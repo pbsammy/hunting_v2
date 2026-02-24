@@ -3,29 +3,33 @@ name: Generate Threat Hunt Report
 on:
   workflow_dispatch:
     inputs:
-      threat_name:
-        description: 'Name of the threat or vulnerability (e.g., Whisper Leak, Log4Shell)'
+      topic:
+        description: "Threat topic or CVE (e.g., CVE-2023-23397, Log4Shell)"
         required: true
-      mitre_attack_id:
-        description: 'MITRE ATT&CK ID (e.g., T1578)'
-        required: false
-        default: 'N/A'
+      threat_name:
+        description: "Name of the threat or vulnerability"
+        required: true
       threat_description:
-        description: 'Detailed description of the threat.'
+        description: "Detailed description of the threat"
         required: true
       attack_vector:
-        description: 'The attack vector (how the attack works).'
+        description: "How the attack works"
         required: true
       detection_hypothesis:
-        description: 'Hypothesis for detecting this activity.'
+        description: "Your hunting hypothesis"
         required: true
-      resources:
-        description: 'Comma-separated list of resource URLs.'
+      mitre_attack_id:
+        description: "MITRE ATT&CK technique IDs (comma-separated)"
         required: false
+        default: "N/A"
+      resources:
+        description: "Comma-separated list of external references"
+        required: false
+        default: "None"
       output_filename:
-        description: 'Name of the output report file'
+        description: "Output file name"
         required: true
-        default: 'threat_hunt_report.md'
+        default: "threat_hunt_report.md"
 
 jobs:
   generate-report:
@@ -38,25 +42,67 @@ jobs:
     - name: Set up Python
       uses: actions/setup-python@v4
       with:
-        python-version: '3.10'
+        python-version: '3.11'
 
     - name: Install dependencies
       run: |
-        python -m pip install --upgrade pip
-        pip install google-generativeai
+        pip install --upgrade pip
+        pip install google-genai
 
     - name: Generate Report
       env:
         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
       run: |
         python main_ai_studio.py \
-          --threat-name "${{ github.event.inputs.threat_name }}" \
-          --mitre-attack-id "${{ github.event.inputs.mitre_attack_id }}" \
-          --threat-description "${{ github.event.inputs.threat_description }}" \
-          --attack-vector "${{ github.event.inputs.attack_vector }}" \
-          --detection-hypothesis "${{ github.event.inputs.detection_hypothesis }}" \
-          --resources "${{ github.event.inputs.resources }}" \
-          --output "${{ github.event.inputs.output_filename }}"
+          --no-stream \
+          --system "You are a senior threat intelligence and threat hunting analyst. Produce high-clarity, fully structured markdown reports." \
+          --prompt "Generate a threat hunting report using the following structured input:
+
+Topic: ${{ github.event.inputs.topic }}
+Threat Name: ${{ github.event.inputs.threat_name }}
+Threat Description: ${{ github.event.inputs.threat_description }}
+Attack Vector: ${{ github.event.inputs.attack_vector }}
+Detection Hypothesis: ${{ github.event.inputs.detection_hypothesis }}
+MITRE ATT&CK: ${{ github.event.inputs.mitre_attack_id }}
+References: ${{ github.event.inputs.resources }}
+
+Please create a markdown report with:
+
+# Threat Overview
+- Executive summary
+- Background and context
+
+# Technical Details
+- Attack vector explanation
+- CVE or vulnerability breakdown (if applicable)
+- Capabilities and behaviors
+
+# Hypothesis
+Rewrite and expand the hypothesis into a detailed detection-focused narrative.
+
+# Data Sources
+List relevant logs, sensors, and artifacts for this hunt.
+
+# Hunting Procedure
+Provide step-by-step hunting actions and logic.
+
+# Detection Opportunities
+Provide queries, indicators, suspicious patterns, and high-signal behaviors.
+
+# MITRE ATT&CK Mapping
+Turn IDs into full tactic+technique names.
+
+# Indicators
+Any domains, IPs, filenames, hashes, behavior patterns, etc.
+
+# Defensive Recommendations
+Hardening, patching, monitoring, and response actions.
+
+# References
+Turn the user-provided links into a formatted list.
+
+" \
+          --output ${{ github.event.inputs.output_filename }}
 
     - name: Upload Report Artifact
       uses: actions/upload-artifact@v3
