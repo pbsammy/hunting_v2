@@ -36,76 +36,81 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v3
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install google-genai
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install google-genai
 
-    - name: Generate Report
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      run: |
-        python main_ai_studio.py \
-          --no-stream \
-          --system "You are a senior threat intelligence and threat hunting analyst. Produce high-clarity, fully structured markdown reports." \
-          --prompt "Generate a threat hunting report using the following structured input:
+      - name: Build structured prompt (heredoc)
+        shell: bash
+        run: |
+          cat > prompt.txt << 'PROMPT'
+          Generate a threat hunting report using the following structured input:
 
-Topic: ${{ github.event.inputs.topic }}
-Threat Name: ${{ github.event.inputs.threat_name }}
-Threat Description: ${{ github.event.inputs.threat_description }}
-Attack Vector: ${{ github.event.inputs.attack_vector }}
-Detection Hypothesis: ${{ github.event.inputs.detection_hypothesis }}
-MITRE ATT&CK: ${{ github.event.inputs.mitre_attack_id }}
-References: ${{ github.event.inputs.resources }}
+          Topic: ${{ github.event.inputs.topic }}
+          Threat Name: ${{ github.event.inputs.threat_name }}
+          Threat Description: ${{ github.event.inputs.threat_description }}
+          Attack Vector: ${{ github.event.inputs.attack_vector }}
+          Detection Hypothesis: ${{ github.event.inputs.detection_hypothesis }}
+          MITRE ATT&CK: ${{ github.event.inputs.mitre_attack_id }}
+          References: ${{ github.event.inputs.resources }}
 
-Please create a markdown report with:
+          Please create a markdown report with:
 
-# Threat Overview
-- Executive summary
-- Background and context
+          # Threat Overview
+          - Executive summary
+          - Background and context
 
-# Technical Details
-- Attack vector explanation
-- CVE or vulnerability breakdown (if applicable)
-- Capabilities and behaviors
+          # Technical Details
+          - Attack vector explanation
+          - CVE or vulnerability breakdown (if applicable)
+          - Capabilities and behaviors
 
-# Hypothesis
-Rewrite and expand the hypothesis into a detailed detection-focused narrative.
+          # Hypothesis
+          Rewrite and expand the hypothesis into a detailed detection-focused narrative.
 
-# Data Sources
-List relevant logs, sensors, and artifacts for this hunt.
+          # Data Sources
+          List relevant logs, sensors, and artifacts for this hunt.
 
-# Hunting Procedure
-Provide step-by-step hunting actions and logic.
+          # Hunting Procedure
+          Provide step-by-step hunting actions and logic.
 
-# Detection Opportunities
-Provide queries, indicators, suspicious patterns, and high-signal behaviors.
+          # Detection Opportunities
+          Provide queries, indicators, suspicious patterns, and high-signal behaviors.
 
-# MITRE ATT&CK Mapping
-Turn IDs into full tactic+technique names.
+          # MITRE ATT&CK Mapping
+          Turn IDs into full tactic+technique names.
 
-# Indicators
-Any domains, IPs, filenames, hashes, behavior patterns, etc.
+          # Indicators
+          Any domains, IPs, filenames, hashes, behavior patterns, etc.
 
-# Defensive Recommendations
-Hardening, patching, monitoring, and response actions.
+          # Defensive Recommendations
+          Hardening, patching, monitoring, and response actions.
 
-# References
-Turn the user-provided links into a formatted list.
+          # References
+          Turn the user-provided links into a formatted list.
+          PROMPT
 
-" \
-          --output ${{ github.event.inputs.output_filename }}
+      - name: Generate Report
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python app/main_ai_studio.py \
+            --no-stream \
+            --system "You are a senior threat intelligence and threat hunting analyst. Produce high-clarity, fully structured markdown reports." \
+            --prompt-file prompt.txt \
+            --output "${{ github.event.inputs.output_filename }}"
 
-    - name: Upload Report Artifact
-      uses: actions/upload-artifact@v3
-      with:
-        name: threat-hunt-report
-        path: ${{ github.event.inputs.output_filename }}
+      - name: Upload Report Artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: threat-hunt-report
+          path: ${{ github.event.inputs.output_filename }}
