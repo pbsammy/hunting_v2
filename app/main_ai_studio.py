@@ -4,7 +4,7 @@ Threat Hunt Report generator using the Google Gen AI SDK (google.genai).
 
 Key features:
 - Single-turn generation with a structured prompt (no chat message dicts).
-- Persona/behavior instruction via GenerateContentConfig system_instruction.
+- Persona/behavior instruction via top-level `system_instruction` (REST v1 expects snake_case).
 - Optional attachments via client.files.upload() (e.g., logs or artifacts).
 - Streaming and non-streamed generation supported.
 - API version pinned to v1 for stability.
@@ -13,7 +13,6 @@ Key features:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import os
 import sys
@@ -37,12 +36,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 
-
 # -------- Helpers --------
 def read_text(path: str) -> str:
     with open(path, "r", encoding="utf-8") as f:
         return f.read()
-
 
 def ensure_api_key(env_var: str = DEFAULT_API_KEY_ENV) -> str:
     api_key = os.environ.get(env_var, "").strip()
@@ -51,7 +48,6 @@ def ensure_api_key(env_var: str = DEFAULT_API_KEY_ENV) -> str:
             f"Missing API key. Set environment variable {env_var} with your Gemini API key."
         )
     return api_key
-
 
 def build_client(api_key_env: str = DEFAULT_API_KEY_ENV) -> genai.Client:
     """
@@ -64,17 +60,18 @@ def build_client(api_key_env: str = DEFAULT_API_KEY_ENV) -> genai.Client:
     client = genai.Client(api_key=api_key, http_options=http_opts)
     return client
 
-
-def upload_attachments(client: genai.Client, paths: List[str]) -> List[types.File]:
-    handles: List[types.File] = []
+def upload_attachments(client: genai.Client, paths: List[str]) -> List[types.Part]:
+    """
+    Upload files and return Parts that can be included in the user Content.
+    """
+    parts: List[types.Part] = []
     for p in paths:
         if not os.path.exists(p):
             raise FileNotFoundError(f"Attachment not found: {p}")
         LOG.info("Uploading attachment: %s", p)
-        fh = client.files.upload(path=p)
-        handles.append(fh)
-    return handles
-
+        fh = client.files.upload(path=p)         # returns a File handle
+        parts.append(types.Part.from_file(fh))   # wrap as Part for contents
+    return parts
 
 def do_generate(
     client: genai.Client,
@@ -89,13 +86,9 @@ def do_generate(
     attempt = 0
     last_exc = None
 
-    cfg = None
-    if system_instruction or generation_config:
-        # Persona/behavior instruction via system_instruction
-        cfg = types.GenerateContentConfig(
-            system_instruction=system_instruction if system_instruction else None,
-            **(generation_config or {})
-        )
+    gen_cfg = None
+    if generation_config:
+        gen_cfg = types.GenerationConfig(**generation_config)
 
     while attempt < max_retries:
         try:
@@ -104,7 +97,8 @@ def do_generate(
                 resp_iter = client.models.generate_content_stream(
                     model=model_name,
                     contents=contents,
-                    config=cfg,
+                    system_instruction=system_instruction,
+                    generation_config=gen_cfg,
                 )
                 return resp_iter
             else:
@@ -112,7 +106,8 @@ def do_generate(
                 resp = client.models.generate_content(
                     model=model_name,
                     contents=contents,
-                    config=cfg,
+                    system_instruction=system_instruction,
+                    generation_config=gen_cfg,
                 )
                 return resp
         except Exception as e:
@@ -127,7 +122,6 @@ def do_generate(
                 LOG.error("Max retries reached.")
                 raise last_exc
 
-
 def accumulate_stream(stream_resp) -> str:
     full_text = []
     try:
@@ -140,7 +134,6 @@ def accumulate_stream(stream_resp) -> str:
         LOG.error("Error while streaming: %s", repr(e))
         raise
     return "".join(full_text)
-
 
 # -------- CLI --------
 def make_argparser() -> argparse.ArgumentParser:
@@ -168,7 +161,6 @@ def make_argparser() -> argparse.ArgumentParser:
     p.add_argument("--smoke-test", action="store_true", help="Quick test to verify SDK.")
     return p
 
-
 def resolve_text_arg(arg_value: Optional[str], file_path: Optional[str]) -> Optional[str]:
     if arg_value:
         return arg_value
@@ -176,20 +168,18 @@ def resolve_text_arg(arg_value: Optional[str], file_path: Optional[str]) -> Opti
         return read_text(file_path)
     return None
 
-
 def run_smoke_test() -> None:
     LOG.info("Running smoke test...")
     client = build_client()
     resp = client.models.generate_content(
         model=DEFAULT_MODEL,
-        contents="Say hello in one sentence.",
-        config=types.GenerateContentConfig(system_instruction="Respond concisely."),
+        contents=[types.Content(role="user", parts=[types.Part.from_text("Say hello in one sentence.")])],
+        system_instruction="Respond concisely.",
     )
     txt = getattr(resp, "text", "")
     assert txt, "Smoke test failed: empty response.text"
     print("Smoke test output:", txt)
     LOG.info("Smoke test passed.")
-
 
 def main() -> int:
     args = make_argparser().parse_args()
@@ -225,17 +215,19 @@ def main() -> int:
     if not generation_config:
         generation_config = None
 
-    # Build contents
-    contents: List[object] = [types.Part.from_text(text=user_prompt)]
+    # Build contents (single user message with text + optional attachments)
+    user_parts: List[types.Part] = [types.Part.from_text(text=user_prompt)]
 
     # Attachments (optional)
     try:
         if args.attach:
-            files = upload_attachments(client, args.attach)
-            contents.extend(files)
+            attach_parts = upload_attachments(client, args.attach)
+            user_parts.extend(attach_parts)
     except Exception as e:
         LOG.error("Attachment upload error: %s", repr(e))
         return 2
+
+    contents: List[types.Content] = [types.Content(role="user", parts=user_parts)]
 
     # Generate
     try:
@@ -274,4 +266,3 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
