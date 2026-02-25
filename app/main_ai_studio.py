@@ -4,7 +4,7 @@ Threat Hunt Report generator using the Google Gen AI SDK (google.genai).
 
 Key features:
 - Single-turn generation with a structured prompt (no chat message dicts).
-- Persona/behavior instruction via top-level `system_instruction` (REST v1 expects snake_case).
+- Persona/behavior instruction: top-level system_instruction (preferred), or inline fallback.
 - Optional attachments via client.files.upload() (e.g., logs or artifacts).
 - Streaming and non-streamed generation supported.
 - API version pinned to v1 for stability.
@@ -29,6 +29,7 @@ DEFAULT_API_KEY_ENV = "GEMINI_API_KEY"
 DEFAULT_MAX_RETRIES = 3
 DEFAULT_RETRY_BACKOFF_SEC = 2.0
 PIN_API_V1 = True  # pin to stable v1 to avoid v1beta model mismatch
+INLINE_SYSTEM = os.environ.get("GEMINI_INLINE_SYSTEM", "0") == "1"  # set to "1" to inline system prompt
 
 LOG = logging.getLogger("main_ai_studio")
 logging.basicConfig(
@@ -89,6 +90,22 @@ def do_generate(
     gen_cfg = None
     if generation_config:
         gen_cfg = types.GenerationConfig(**generation_config)
+
+    # Inline fallback: remove system_instruction and prefix user text
+    if INLINE_SYSTEM and system_instruction:
+        LOG.info("Inline system instruction is ENABLED (GEMINI_INLINE_SYSTEM=1).")
+        # contents is a list of Content; first message is user
+        if isinstance(contents, list) and contents and hasattr(contents[0], "parts"):
+            # Prepend the system instruction text to the first user part
+            system_text = f"System instruction:\n{system_instruction}\n\n"
+            # If first part is text, prepend; else insert a new text part at position 0
+            first_parts = contents[0].parts
+            if first_parts and hasattr(first_parts[0], "text") and first_parts[0].text:
+                first_parts[0].text = system_text + first_parts[0].text
+            else:
+                first_parts.insert(0, types.Part.from_text(system_text))
+        # Clear system_instruction so it's not sent to the API
+        system_instruction = None
 
     while attempt < max_retries:
         try:
@@ -171,10 +188,10 @@ def resolve_text_arg(arg_value: Optional[str], file_path: Optional[str]) -> Opti
 def run_smoke_test() -> None:
     LOG.info("Running smoke test...")
     client = build_client()
+    # Simple single user message; no explicit system_instruction to avoid SDK casing issues
     resp = client.models.generate_content(
         model=DEFAULT_MODEL,
         contents=[types.Content(role="user", parts=[types.Part.from_text("Say hello in one sentence.")])],
-        system_instruction="Respond concisely.",
     )
     txt = getattr(resp, "text", "")
     assert txt, "Smoke test failed: empty response.text"
@@ -266,3 +283,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    sys.exit(main())
