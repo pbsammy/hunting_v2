@@ -19,16 +19,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) (Optional) Debug: show workspace so we can confirm paths quickly
-      - name: Debug workspace layout
+      # 2) Debug workspace (you can remove after things stabilize)
+      - name: Debug workspace
         shell: bash
         run: |
-          echo "PWD=$(pwd)"
+          echo "PWD: $(pwd)"
+          echo "---- top level ----"
           ls -la
-          echo "----- tree (top-level) -----"
-          find . -maxdepth 2 -type d -print
-          echo "----- prompts/ -----"
-          [ -d prompts ] && ls -la prompts || echo "no prompts/ dir found"
+          echo "---- prompts ----"
+          ls -la prompts || true
+          echo "---- output ----"
+          ls -la output || true
 
       # 3) Setup Python
       - name: Setup Python
@@ -50,14 +51,17 @@ jobs:
             pip install "google-genai>=1.62.0"
           fi
 
-      # 5) Preflight - verify prompt path & prepare attachments
+      # 5) Preflight - verify inputs
       - name: Preflight - verify inputs
         shell: bash
         run: |
           set -euo pipefail
-          test -f prompts/hunt_system_prompt.txt \
-            || { echo "::error title=Missing prompt::prompts/hunt_system_prompt.txt not found"; exit 1; }
 
+          # Confirm your system prompt exists:
+          test -f prompts/hunt_system_prompt.txt \
+            || { echo "::error::prompts/hunt_system_prompt.txt NOT FOUND"; exit 1; }
+
+          # Create output folder & attachments if missing
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
@@ -66,16 +70,26 @@ jobs:
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_INLINE_SYSTEM: "1"  # remove once google-genai upgrade is confirmed
+          GEMINI_INLINE_SYSTEM: "1"   # Remove when SDK upgrade fully stabilizes
         run: |
           set -euo pipefail
           python app/main_ai_studio.py \
             --prompt-file prompts/hunt_system_prompt.txt \
             --attach output/logs.txt output/findings.json \
             --no-stream \
-            --output output/threat_hunt_report.md
+            --output "${{ github.workspace }}/output/threat_hunt_report.md"
 
-      # 7) Upload artifact (supported v4 action)
+      # 7) Verify output exists
+      - name: Verify report generated
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Checking output folder:"
+          ls -la output
+          test -f output/threat_hunt_report.md \
+            || { echo "::error::Threat hunt report NOT generated"; exit 1; }
+
+      # 8) Upload artifact
       - name: Upload Threat Hunt Report artifact
         uses: actions/upload-artifact@v4
         with:
