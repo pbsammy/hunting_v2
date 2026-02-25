@@ -19,16 +19,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Setup Python
+      # 2) (Optional) Debug: show workspace so we can confirm paths quickly
+      - name: Debug workspace layout
+        shell: bash
+        run: |
+          echo "PWD=$(pwd)"
+          ls -la
+          echo "----- tree (top-level) -----"
+          find . -maxdepth 2 -type d -print
+          echo "----- prompts/ -----"
+          [ -d prompts ] && ls -la prompts || echo "no prompts/ dir found"
+
+      # 3) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 3) Install dependencies (pin google-genai >= 1.62.0)
+      # 4) Install dependencies (pin google-genai >= 1.62.0)
       - name: Install dependencies
         shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             sed -i '/^google-genai/d' requirements.txt || true
@@ -38,30 +50,32 @@ jobs:
             pip install "google-genai>=1.62.0"
           fi
 
-      # 4) Preflight - verify required prompt file exists
+      # 5) Preflight - verify prompt path & prepare attachments
       - name: Preflight - verify inputs
         shell: bash
         run: |
-          test -f hunt_system_prompt.txt \
-            || { echo "::error title=Missing prompt::hunt_system_prompt.txt not found"; exit 1; }
+          set -euo pipefail
+          test -f prompts/hunt_system_prompt.txt \
+            || { echo "::error title=Missing prompt::prompts/hunt_system_prompt.txt not found"; exit 1; }
 
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
 
-      # 5) Run the report generator (inline workaround enabled)
+      # 6) Run report generator (inline workaround enabled)
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_INLINE_SYSTEM: "1"
+          GEMINI_INLINE_SYSTEM: "1"  # remove once google-genai upgrade is confirmed
         run: |
+          set -euo pipefail
           python app/main_ai_studio.py \
-            --prompt-file hunt_system_prompt.txt \
+            --prompt-file prompts/hunt_system_prompt.txt \
             --attach output/logs.txt output/findings.json \
             --no-stream \
             --output output/threat_hunt_report.md
 
-      # 6) Upload artifact
+      # 7) Upload artifact (supported v4 action)
       - name: Upload Threat Hunt Report artifact
         uses: actions/upload-artifact@v4
         with:
