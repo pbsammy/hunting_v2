@@ -1,244 +1,265 @@
 #!/usr/bin/env python3
 """
-Threat Hunt Report generator using the Google Gen AI SDK (google.genai).
+Generate a Threat Hunt Report from a system prompt + idea + optional attachments,
+using the Google GenAI (Gemini) SDK.
 
-Key features:
-- Single-turn generation with a structured prompt (no chat message dicts).
-- Persona/behavior instruction via top-level `system_instruction` (REST v1 expects snake_case).
-- Optional attachments via client.files.upload() (e.g., logs or artifacts).
-- Streaming and non-streamed generation supported.
-- API version pinned to v1 for stability.
+Exit codes:
+  1 - invalid CLI usage / missing required args
+  2 - missing GEMINI_API_KEY
+  3 - system prompt file missing/unreadable
+  4 - generation error (API call failed)
+  5 - model returned empty content
+  6 - write failure (unable to write output file)
+
+Usage example:
+  python app/main_ai_studio.py \
+    --system-file prompts/hunt_system_prompt.txt \
+    --prompt "malicious use of workload identities" \
+    --attach output/logs.txt output/findings.json \
+    --no-stream \
+    --output output/threat_hunt_report.md
 """
 
-from __future__ import annotations
-
 import argparse
-import logging
-import mimetypes
 import os
 import sys
 import time
+import json
+import traceback
+from datetime import datetime
 from typing import List, Optional
 
-# Google Gen AI SDK (new, supported)
+# SDK: google-genai >= 1.62.0
+# pip install google-genai>=1.62.0
 from google import genai
 from google.genai import types
 
-# -------- Defaults --------
-DEFAULT_MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-DEFAULT_API_KEY_ENV = "GEMINI_API_KEY"
-DEFAULT_MAX_RETRIES = 3
-DEFAULT_RETRY_BACKOFF_SEC = 2.0
-PIN_API_V1 = True  # pin to stable v1 to avoid v1beta model mismatch
-INLINE_SYSTEM = os.environ.get("GEMINI_INLINE_SYSTEM", "0") == "1"  # set to "1" to inline system prompt
+# -------- Utilities -------- #
 
-LOG = logging.getLogger("main_ai_studio")
-logging.basicConfig(
-    level=os.environ.get("LOG_LEVEL", "INFO"),
-    format="%(asctime)s %(levelname)s %(message)s",
-)
+def log(msg: str) -> None:
+    """Structured stderr logging with timestamp."""
+    ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    sys.stderr.write(f"[{ts}] {msg}\n")
+    sys.stderr.flush()
 
-# -------- Helpers --------
-def read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+def read_text_file(path: str, max_bytes: int = 2_000_000) -> Optional[str]:
+    """Read text file safely; returns None if missing/unreadable."""
+    try:
+        if not os.path.isfile(path):
+            log(f"WARNING: attachment not found: {path}")
+            return None
+        size = os.path.getsize(path)
+        if size > max_bytes:
+            log(f"WARNING: attachment too large ({size} bytes), truncating to {max_bytes}: {path}")
+        with open(path, "rb") as f:
+            data = f.read(max_bytes)
+        # Try to decode as utf-8; fallback with replace.
+        return data.decode("utf-8", errors="replace")
+    except Exception as e:
+        log(f"WARNING: failed to read attachment {path}: {e}")
+        return None
 
-def ensure_api_key(env_var: str = DEFAULT_API_KEY_ENV) -> str:
-    api_key = os.environ.get(env_var, "").strip()
+def ensure_parent_dir(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
+# -------- Prompt Assembly -------- #
+
+def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
+    """
+    Builds the user content that goes with the system prompt.
+    Includes the idea and formatted attachments.
+    """
+    lines = []
+    lines.append(f"THREAT HUNT IDEA:\n{idea.strip()}\n")
+    if attachments:
+        lines.append("ATTACHMENTS:")
+        for idx, apath in enumerate(attachments, start=1):
+            content = read_text_file(apath)
+            if content is None:
+                # Skip missing/unreadable files
+                continue
+            size = len(content.encode("utf-8"))
+            ext = os.path.splitext(apath)[1].lower()
+            lines.append(f"\n--- Attachment {idx} ---")
+            lines.append(f"Path: {apath}")
+            lines.append(f"Type: {ext or 'text'} | Size: {size} bytes")
+            # Provide a fenced block for clarity
+            lines.append("```")
+            lines.append(content)
+            lines.append("```")
+    return "\n".join(lines).strip()
+
+# -------- Model Call -------- #
+
+def generate_report(
+    api_key: str,
+    system_prompt: str,
+    user_prompt: str,
+    model_name: str = "gemini-1.5-pro",
+    stream: bool = True,
+    temperature: float = 0.2,
+    top_p: float = 0.9,
+    max_output_tokens: int = 8192,
+    safety: Optional[List[types.SafetySetting]] = None,
+) -> str:
+    """
+    Calls Gemini to generate the report. Returns markdown string (non-empty),
+    or raises RuntimeError on failure.
+    """
+    client = genai.Client(api_key=api_key)
+
+    # Build the content parts
+    system_part = types.Part.from_text(system_prompt)
+    user_part = types.Part.from_text(user_prompt)
+
+    # Configure generation
+    config = types.GenerateContentConfig(
+        temperature=temperature,
+        top_p=top_p,
+        max_output_tokens=max_output_tokens,
+        safety_settings=safety or [],
+        response_mime_type="text/markdown",  # ask for markdown
+    )
+
+    # Request
+    start = time.time()
+    try:
+      # Use multi-part with system+user roles (SDK supports role-based content)
+      req = types.GenerateContentRequest(
+          model=model_name,
+          config=config,
+          contents=[
+              types.Content(role="system", parts=[system_part]),
+              types.Content(role="user", parts=[user_part]),
+          ],
+      )
+      if stream:
+          log(f"Invoking model (streaming): {model_name}")
+          chunks = []
+          for evt in client.models.generate_content_stream(req):
+              if evt.type == "content":
+                  # Each event carries parts; extract text from MIME-markdown parts
+                  for part in evt.content.parts:
+                      if part.inline_data and part.inline_data.mime_type == "text/markdown":
+                          chunks.append(part.inline_data.data.decode("utf-8", errors="replace"))
+                      elif part.text:
+                          chunks.append(part.text)
+              elif evt.type == "error":
+                  raise RuntimeError(f"Model stream error: {evt.error.message}")
+          output = "".join(chunks).strip()
+      else:
+          log(f"Invoking model (non-stream): {model_name}")
+          resp = client.models.generate_content(req)
+          # Prefer inline_data markdown; fallback to text
+          output = ""
+          for part in resp.candidates[0].content.parts:
+              if part.inline_data and part.inline_data.mime_type == "text/markdown":
+                  output += part.inline_data.data.decode("utf-8", errors="replace")
+              elif part.text:
+                  output += part.text
+          output = (output or "").strip()
+    except Exception as e:
+        raise RuntimeError(f"Generation failed: {e}") from e
+    finally:
+        log(f"Model call duration: {time.time() - start:.2f}s")
+
+    if not output:
+        raise RuntimeError("Model returned empty content")
+    return output
+
+# -------- Main -------- #
+
+def main(argv: List[str]) -> int:
+    parser = argparse.ArgumentParser(description="Threat Hunt Report generator")
+    parser.add_argument("--system-file", required=True, help="Path to system prompt file (text)")
+    parser.add_argument("--prompt", required=True, help="Idea / user prompt text")
+    parser.add_argument("--attach", nargs="*", default=[], help="Paths to attachment files")
+    parser.add_argument("--output", required=True, help="Output markdown path")
+    parser.add_argument("--model", default="gemini-1.5-pro", help="Model name")
+    parser.add_argument("--no-stream", action="store_true", help="Disable streaming")
+    parser.add_argument("--temperature", type=float, default=0.2)
+    parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument("--max-output-tokens", type=int, default=8192)
+
+    args = parser.parse_args(argv)
+
+    api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
-        raise RuntimeError(
-            f"Missing API key. Set environment variable {env_var} with your Gemini API key."
+        log("ERROR: GEMINI_API_KEY not set")
+        return 2
+
+    # Read system prompt
+    try:
+        with open(args.system_file, "r", encoding="utf-8") as f:
+            system_prompt = f.read()
+    except Exception as e:
+        log(f"ERROR: Failed to read system prompt file {args.system_file}: {e}")
+        return 3
+
+    if not system_prompt.strip():
+        log(f"ERROR: System prompt file {args.system_file} is empty")
+        return 3
+
+    idea = (args.prompt or "").strip()
+    if not idea:
+        log("ERROR: --prompt (idea) is required and cannot be empty")
+        return 1
+
+    user_prompt = assemble_user_prompt(idea, args.attach)
+
+    # Generate
+    try:
+        output_md = generate_report(
+            api_key=api_key,
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            model_name=args.model,
+            stream=not args.no_stream,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            max_output_tokens=args.max_output_tokens,
+            safety=[
+                # Add safety settings appropriate for your environment
+                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_MEDIUM_AND_ABOVE"),
+            ],
         )
-    return api_key
-
-def build_client(api_key_env: str = DEFAULT_API_KEY_ENV) -> genai.Client:
-    """
-    Create a GenAI client. Pins API to v1 unless PIN_API_V1 is False.
-    """
-    api_key = ensure_api_key(api_key_env)
-    http_opts = None
-    if PIN_API_V1:
-        http_opts = types.HttpOptions(api_version="v1")
-    client = genai.Client(api_key=api_key, http_options=http_opts)
-    return client
-
-def guess_mime(path: str) -> str:
-    mt, _ = mimetypes.guess_type(path)
-    return mt or "application/octet-stream"
-
-def upload_attachments(client: genai.Client, paths: List[str]) -> List[types.Part]:
-    """
-    Upload files and return Parts that can be included in the user Content.
-    """
-    parts: List[types.Part] = []
-    for p in paths:
-        if not os.path.exists(p):
-            raise FileNotFoundError(f"Attachment not found: {p}")
-        LOG.info("Uploading attachment: %s", p)
-
-        # OPEN THE FILE AND PASS IT AS 'file=' (NOT 'path=')
-        with open(p, "rb") as fh:
-            uploaded = client.files.upload(file=fh, mime_type=guess_mime(p))
-
-        # Wrap the uploaded file as a Part for the contents payload
-        parts.append(types.Part.from_file(uploaded))
-
-    return parts
-
-def do_generate(
-    client: genai.Client,
-    model_name: str,
-    contents: List[object] | object,
-    system_instruction: Optional[str],
-    generation_config: Optional[dict],
-    stream: bool,
-    max_retries: int = DEFAULT_MAX_RETRIES,
-    backoff_sec: float = DEFAULT_RETRY_BACKOFF_SEC,
-):
-    attempt = 0
-    last_exc = None
-
-    gen_cfg = None
-    if generation_config:
-        gen_cfg = types.GenerationConfig(**generation_config)
-
-    # Inline fallback: remove system_instruction and prefix user text
-    if INLINE_SYSTEM and system_instruction:
-        LOG.info("Inline system instruction is ENABLED (GEMINI_INLINE_SYSTEM=1).")
-        # contents is a list of Content; first message is user
-        if isinstance(contents, list) and contents and hasattr(contents[0], "parts"):
-            # Prepend the system instruction text to the first user part
-            system_text = f"System instruction:\n{system_instruction}\n\n"
-            first_parts = contents[0].parts
-            if first_parts and hasattr(first_parts[0], "text") and first_parts[0].text:
-                first_parts[0].text = system_text + first_parts[0].text
-            else:
-                first_parts.insert(0, types.Part.from_text(system_text))
-        # Clear system_instruction so it's not sent to the API
-        system_instruction = None
-
-    while attempt < max_retries:
-        try:
-            if stream:
-                LOG.info("Starting streamed generation...")
-                resp_iter = client.models.generate_content_stream(
-                    model=model_name,
-                    contents=contents,
-                    system_instruction=system_instruction,
-                    generation_config=gen_cfg,
-                )
-                return resp_iter
-            else:
-                LOG.info("Starting non-streamed generation...")
-                resp = client.models.generate_content(
-                    model=model_name,
-                    contents=contents,
-                    system_instruction=system_instruction,
-                    generation_config=gen_cfg,
-                )
-                return resp
-        except Exception as e:
-            last_exc = e
-            attempt += 1
-            wait = backoff_sec * (2 ** (attempt - 1))
-            LOG.warning("Generation attempt %d failed: %s", attempt, repr(e))
-            if attempt < max_retries:
-                LOG.info("Retrying in %.1f seconds...", wait)
-                time.sleep(wait)
-            else:
-                LOG.error("Max retries reached.")
-                raise last_exc
-
-def accumulate_stream(stream_resp) -> str:
-    full_text = []
-    try:
-        for chunk in stream_resp:
-            if hasattr(chunk, "text") and chunk.text:
-                print(chunk.text, end="", flush=True)
-                full_text.append(chunk.text)
-        print()
     except Exception as e:
-        LOG.error("Error while streaming: %s", repr(e))
-        raise
-    return "".join(full_text)
+        log(f"ERROR: {e}")
+        traceback.print_exc(file=sys.stderr)
+        return 4
 
-# -------- CLI --------
-def make_argparser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
-        description="Generate a threat hunt report using Google Gen AI (single-turn)."
-    )
-    p.add_argument("--model", default=DEFAULT_MODEL, help=f"Model name (default: {DEFAULT_MODEL})")
-    p.add_argument("--system", help="Persona/behavior instruction text.")
-    p.add_argument("--system-file", help="Path to a file containing the instruction text.")
-    prompt_group = p.add_mutually_exclusive_group(required=True)
-    prompt_group.add_argument("--prompt", help="User prompt as a single string.")
-    prompt_group.add_argument("--prompt-file", help="Path to a file containing the prompt.")
-    p.add_argument("--attach", nargs="*", default=[], help="Paths to files to upload and include.")
-    p.add_argument("--no-stream", action="store_true", help="Disable streaming; return full response.")
-    p.add_argument("--output", help="Write final text to this file.")
-    p.add_argument("--api-key-env", default=DEFAULT_API_KEY_ENV, help=f"Env var for API key (default: {DEFAULT_API_KEY_ENV}).")
+    # Fail if the content is suspiciously tiny (header-only)
+    if len(output_md.encode("utf-8")) < 256:
+        log("ERROR: Generated report is too small (<256 bytes); treating as empty")
+        return 5
 
-    # Optional generation parameters
-    p.add_argument("--temperature", type=float, help="Optional temperature.")
-    p.add_argument("--top-p", type=float, help="Optional top_p.")
-    p.add_argument("--top-k", type=int, help="Optional top_k.")
-    p.add_argument("--max-output-tokens", type=int, help="Optional max_output_tokens.")
-
-    # Quick smoke test
-    p.add_argument("--smoke-test", action="store_true", help="Quick test to verify SDK.")
-    return p
-
-def resolve_text_arg(arg_value: Optional[str], file_path: Optional[str]) -> Optional[str]:
-    if arg_value:
-        return arg_value
-    if file_path:
-        return read_text(file_path)
-    return None
-
-def run_smoke_test() -> None:
-    LOG.info("Running smoke test...")
-    client = build_client()
-    resp = client.models.generate_content(
-        model=DEFAULT_MODEL,
-        contents=[types.Content(role="user", parts=[types.Part.from_text("Say hello in one sentence.")])],
-        system_instruction="Respond concisely.",
-    )
-    txt = getattr(resp, "text", "")
-    assert txt, "Smoke test failed: empty response.text"
-    print("Smoke test output:", txt)
-    LOG.info("Smoke test passed.")
-
-def main() -> int:
-    args = make_argparser().parse_args()
-
-    if args.smoke_test:
-        run_smoke_test()
-        return 0
-
-    # Build client
+    # Write output
     try:
-        client = build_client(args.api_key_env)
+        ensure_parent_dir(args.output)
+        with open(args.output, "w", encoding="utf-8") as f:
+            f.write(output_md)
     except Exception as e:
-        LOG.error("Client configuration error: %s", repr(e))
-        return 2
+        log(f"ERROR: Failed to write output to {args.output}: {e}")
+        return 6
 
-    # Resolve instruction & prompt
-    system_instruction = resolve_text_arg(args.system, args.system_file)
-    user_prompt = resolve_text_arg(args.prompt, args.prompt_file)
-    if not user_prompt:
-        LOG.error("No user prompt provided.")
-        return 2
+    # Emit short summary to STDOUT for CI logs
+    print(json.dumps({
+        "status": "ok",
+        "output_path": args.output,
+        "size_bytes": len(output_md.encode("utf-8")),
+        "model": args.model,
+        "streaming": not args.no_stream,
+    }, indent=2))
 
-    # Generation config
-    generation_config = {}
-    if args.temperature is not None:
-        generation_config["temperature"] = args.temperature
-    if args.top_p is not None:
-        generation_config["top_p"] = args.top_p
-    if args.top_k is not None:
-        generation_config["top_k"] = args.top_k
-    if args.max_output_tokens is not None:
-        generation_config["max_output_tokens"] = args.max_output_tokens
-    if not generation_config:
-        generation_config = None
+    log(f"SUCCESS: Wrote report to {args.output}")
+    return 0
 
+
+if __name__ == "__main__":
+    try:
+        code = main(sys.argv[1:])
+        sys.exit(code)
+    except KeyboardInterrupt:
+        log("Interrupted by user")
