@@ -19,27 +19,57 @@ jobs:
   generate-report:
     runs-on: ubuntu-latest
 
+    env:
+      # Normalize IDEA across event types:
+      # - For workflow_dispatch: use the provided input
+      # - For push: try to parse "idea: ..." from the commit message, else use a default placeholder
+      IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || '' }}
+
     steps:
       # 1) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Debug (optional; remove later)
+      # 2) Resolve IDEA for push events
+      - name: Resolve IDEA (push events)
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${IDEA:-}" ]; then
+            COMMIT_MSG="$(git log -1 --pretty=%B)"
+            # Try to extract "idea: ..." from commit message
+            EXTRACTED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^[[:space:]]*[Ii][Dd][Ee][Aa][[:space:]]*:[[:space:]]*//p' | head -n1)"
+            if [ -n "$EXTRACTED" ]; then
+              echo "Found IDEA in commit message: $EXTRACTED"
+              echo "IDEA=$EXTRACTED" >> "$GITHUB_ENV"
+            else
+              echo "::warning::No IDEA provided; using placeholder for push event."
+              echo "IDEA=Hunting cadence run (no explicit idea provided)" >> "$GITHUB_ENV"
+            fi
+          else
+            echo "IDEA already set: ${IDEA}"
+          fi
+
+      # 3) Debug (optional; remove later)
       - name: Debug workspace
         shell: bash
         run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "IDEA: ${IDEA}"
           echo "PWD: $(pwd)"
           ls -la
           echo "---- prompts ----"; ls -la prompts || true
           echo "---- output ----"; ls -la output || true
 
-      # 3) Python
+      # 4) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      # 4) Dependencies (SDK >= 1.62.0; your runner already installed 1.64.0)
+      # 5) Dependencies (SDK >= 1.62.0)
       - name: Install dependencies
         shell: bash
         run: |
@@ -53,7 +83,7 @@ jobs:
             pip install "google-genai>=1.62.0"
           fi
 
-      # 5) Preflight: verify prompts + prepare attachments
+      # 6) Preflight: verify prompts + prepare attachments
       - name: Preflight - verify inputs
         shell: bash
         run: |
@@ -64,12 +94,13 @@ jobs:
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
-          echo "Idea: '${{ inputs.idea }}'"
+          echo "Idea: '${IDEA}'"
 
-      # 6) Generate report (system + idea)
+      # 7) Generate report (system + idea)
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        shell: bash
         run: |
           set -euxo pipefail
           OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
@@ -77,37 +108,53 @@ jobs:
           # Pass system prompt file AND the IDEA as the user prompt
           python app/main_ai_studio.py \
             --system-file prompts/hunt_system_prompt.txt \
-            --prompt "${{ inputs.idea }}" \
+            --prompt "${IDEA}" \
             --attach output/logs.txt output/findings.json \
             --no-stream \
             --output "${OUT_PATH}"
 
-          # Fallback: if generator produced no file or zero bytes, create minimal file
-          if [ ! -s "${OUT_PATH}" ]; then
-            echo "::warning::Report not created or empty; creating fallback file."
-            {
-              echo "# Threat Hunt Report"
-              echo
-              echo "_No generated content was produced for idea: '${{ inputs.idea }}'._"
-              echo
-              echo "## Attachments included"
-              echo "- logs.txt"
-              echo "- findings.json"
-            } > "${OUT_PATH}"
+          # Echo result size to logs (helps debug path/content issues)
+          if [ -f "${OUT_PATH}" ]; then
+            echo "Generated file: ${OUT_PATH}"
+            stat -c "Size: %s bytes, Modified: %y" "${OUT_PATH}" || true
+          else
+            echo "::warning::Report file not found at ${OUT_PATH}"
           fi
 
-      # 7) Verify & upload
+      # 8) Verify output (fail loudly if empty or missing)
       - name: Verify report generated
         shell: bash
         run: |
           set -euo pipefail
           ls -la output
-          test -f output/threat_hunt_report.md \
-            || { echo "::error::Threat hunt report NOT generated"; exit 1; }
+          REPORT="output/threat_hunt_report.md"
+          if [ ! -f "$REPORT" ]; then
+            echo "::error::Threat hunt report NOT generated at $REPORT"
+            exit 1
+          fi
+          if ! test -s "$REPORT"; then
+            echo "::error::Threat hunt report is empty (0 bytes) at $REPORT"
+            echo "IDEA: ${IDEA}"
+            exit 2
+          fi
+          echo "Report is present and non-empty."
 
+      # 9) Upload the report artifact (strict)
       - name: Upload Threat Hunt Report artifact
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report
           path: output/threat_hunt_report.md
+          if-no-files-found: error
           retention-days: 30
+
+      # 10) (Optional) Upload diagnostic logs to help troubleshoot future runs
+      - name: Upload generator logs (optional)
+        uses: actions/upload-artifact@v4
+        with:
+          name: threat-hunt-logs
+          path: |
+            output/logs.txt
+            output/findings.json
+          if-no-files-found: error
+          retention-days: 7
