@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Threat Hunt Report generator with CTA section validation.
+CTA Threat Hunt Report generator — resilient to google-genai SDK changes.
 
 Exit codes:
   1 - invalid CLI usage / missing required args
@@ -11,15 +11,16 @@ Exit codes:
   6 - write failure (unable to write output file)
   7 - section validation failed (missing/short sections or ATT&CK IDs not propagated)
 
-Usage:
+Usage example:
   python app/main_ai_studio.py \
     --system-file prompts/hunt_system_prompt.txt \
-    --prompt "malicious use of workload identities (T1578)" \
+    --prompt "T1578 cloud abuse — malicious use of workload identities" \
     --attach output/logs.txt output/findings.json \
     --no-stream \
     --output output/threat_hunt_report.md \
     --min-section-words 80 \
-    --strict-sections
+    --strict-sections \
+    --require-attack-ids
 """
 
 import argparse
@@ -32,17 +33,22 @@ import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
+# Google Gen AI SDK
+# pip install google-genai==1.64.0  (or >=1.62.0; dicts keep us future-proof)
 from google import genai
-from google.genai import types
 
-# -------- Utilities -------- #
+
+# ---------- Utilities ---------- #
 
 def log(msg: str) -> None:
+    """Structured stderr logging with timestamp."""
     ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     sys.stderr.write(f"[{ts}] {msg}\n")
     sys.stderr.flush()
 
+
 def read_text_file(path: str, max_bytes: int = 2_000_000) -> Optional[str]:
+    """Read text file safely; returns None if missing/unreadable."""
     try:
         if not os.path.isfile(path):
             log(f"WARNING: attachment not found: {path}")
@@ -57,31 +63,30 @@ def read_text_file(path: str, max_bytes: int = 2_000_000) -> Optional[str]:
         log(f"WARNING: failed to read attachment {path}: {e}")
         return None
 
+
 def ensure_parent_dir(path: str) -> None:
     parent = os.path.dirname(os.path.abspath(path))
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
 
-# -------- CTA Section Rules -------- #
+
+# ---------- CTA Section Rules & Validation ---------- #
 
 RE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 
-# Canonical required sections from your prompt
 CANONICAL_SECTIONS = [
     "Background",
     "Hypothesis",
     "Analysis",
-    # Accept either "Suspicious Activity Hits" OR "Findings"
+    # either "Suspicious Activity Hits" OR "Findings" must be present
     "Suspicious Activity Hits",
     "Findings",
     "Recommendations",
     "Additional Research",
-    # Appendix optional
-    "Appendix",
+    "Appendix",   # optional
     "Resources",
 ]
 
-# Map synonyms/acceptable variants to canonical
 SECTION_ALIASES = {
     "Suspicious Activity Hits": {"Suspicious Activity Hits", "Suspicious Activity", "Findings"},
     "Findings": {"Findings", "Suspicious Activity Hits", "Suspicious Activity"},
@@ -89,60 +94,43 @@ SECTION_ALIASES = {
 }
 
 def normalize_heading(text: str) -> str:
-    # Strip punctuation and unify spacing/case for matching
     t = re.sub(r"[^A-Za-z0-9\s]", "", text).strip().lower()
     return t
 
 def find_headings(md: str) -> List[Tuple[str, int]]:
-    """Return list of (heading_text, start_index) for all markdown headings."""
     return [(m.group(1).strip(), m.start()) for m in RE_HEADING.finditer(md)]
 
 def section_spans(md: str) -> Dict[str, str]:
-    """
-    Extract sections as a dict {heading_text: section_body}.
-    Uses heading positions to slice content until the next heading.
-    """
     hits = find_headings(md)
     sections = {}
     for i, (h_text, start_idx) in enumerate(hits):
         end_idx = hits[i + 1][1] if i + 1 < len(hits) else len(md)
         body = md[start_idx:end_idx]
-        # Strip the heading line itself
         body = re.sub(r"^\s{0,3}#{1,6}\s+.*?\n", "", body, count=1, flags=re.MULTILINE).strip()
         sections[h_text] = body
     return sections
 
 def match_required_sections(found: Dict[str, str]) -> Dict[str, Optional[str]]:
-    """
-    Return dict mapping canonical names -> matched heading present in doc (or None).
-    We accept aliases for Suspicious Activity Hits / Findings / Resources.
-    """
     present_map: Dict[str, Optional[str]] = {}
-    # Build normalized lookup
-    by_norm = {normalize_heading(k): k for k in found.keys()}
 
     for canonical in ["Background", "Hypothesis", "Analysis", "Recommendations", "Additional Research", "Appendix", "Resources"]:
-        # exact match first
         if canonical in found:
             present_map[canonical] = canonical
             continue
-        # aliases for "Resources"
         if canonical == "Resources":
             variants = SECTION_ALIASES["Resources"]
             matched = next((v for v in variants if v in found), None)
             present_map[canonical] = matched
             continue
-        # Appendix is optional; we still record if present
         present_map[canonical] = None
 
-    # Handle the Suspicious/Findings requirement (either one must be present)
     findings_present = None
     for variant in SECTION_ALIASES["Findings"]:
         if variant in found:
             findings_present = variant
             break
-    present_map["Suspicious Activity Hits"] = findings_present  # record which one matched
-    present_map["Findings"] = findings_present  # mirror
+    present_map["Suspicious Activity Hits"] = findings_present
+    present_map["Findings"] = findings_present
 
     return present_map
 
@@ -153,21 +141,16 @@ def extract_attack_ids(s: str) -> List[str]:
     return sorted(set(re.findall(r"\bT\d{4}\b", s)))
 
 def validate_cta(md: str, idea: str, min_words: int = 80, require_attack_ids: bool = True) -> Tuple[bool, List[str], Dict[str, int]]:
-    """
-    Validate the output against CTA structure.
-    Returns (is_valid, errors, word_counts_per_section).
-    """
     sections = section_spans(md)
     present_map = match_required_sections(sections)
     errors = []
     word_counts = {}
 
-    # Required: Background, Hypothesis, Analysis, (Findings OR Suspicious Activity Hits), Recommendations, Additional Research, Resources
-    required = ["Background", "Hypothesis", "Analysis", "Recommendations", "Additional Research", "Resources"]
-    # Findings requirement handled via alias presence
+    # Findings / Suspicious Activity requirement
     if present_map["Findings"] is None and present_map["Suspicious Activity Hits"] is None:
         errors.append("Missing required section: Findings or Suspicious Activity Hits")
 
+    required = ["Background", "Hypothesis", "Analysis", "Recommendations", "Additional Research", "Resources"]
     for sec in required:
         matched = present_map.get(sec)
         if not matched:
@@ -179,12 +162,10 @@ def validate_cta(md: str, idea: str, min_words: int = 80, require_attack_ids: bo
             if wc < min_words:
                 errors.append(f"Section '{sec}' is too short ({wc} words < {min_words}).")
 
-    # Appendix is optional; record word count if present
     if present_map.get("Appendix"):
         body = sections.get(present_map["Appendix"], "")
         word_counts["Appendix"] = count_words(body)
 
-    # ATT&CK ID propagation: if idea contains T####, require at least one appears in output body
     if require_attack_ids:
         idea_ids = extract_attack_ids(idea)
         if idea_ids:
@@ -195,14 +176,13 @@ def validate_cta(md: str, idea: str, min_words: int = 80, require_attack_ids: bo
     return (len(errors) == 0), errors, word_counts
 
 def synthesize_skeleton(sec_name: str, idea: str) -> str:
-    """A minimal placeholder that maintains your CTA structure without CUI markings."""
     return (
         f"### {sec_name}\n"
-        f"_This section could not be auto-synthesized. Use the hunt idea_ **{idea}** _to expand this section with behaviors, analytics (KQL/pseudo‑KQL), telemetry hints, ATT&CK mappings, and recommendations._\n"
+        f"_This section could not be auto-synthesized. Use the hunt idea_ **{idea}** "
+        f"_to expand this section with behaviors, analytics (KQL/pseudo‑KQL), telemetry hints, ATT&CK mappings, and recommendations._\n"
     )
 
-def add_missing_sections(md: str, idea: str, min_words: int, missing_sections: List[str]) -> str:
-    """Append skeleton sections for any missing entries."""
+def add_missing_sections(md: str, idea: str, missing_sections: List[str]) -> str:
     additions = []
     for sec in missing_sections:
         additions.append(synthesize_skeleton(sec, idea))
@@ -210,7 +190,8 @@ def add_missing_sections(md: str, idea: str, min_words: int, missing_sections: L
         md = md.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
     return md
 
-# -------- Prompt Assembly -------- #
+
+# ---------- Prompt Assembly ---------- #
 
 def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
     lines = []
@@ -238,7 +219,8 @@ def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
     )
     return "\n".join(lines).strip()
 
-# -------- Model Call -------- #
+
+# ---------- Model Call (dict-based; stream & non-stream) ---------- #
 
 def generate_report(
     api_key: str,
@@ -251,33 +233,39 @@ def generate_report(
     max_output_tokens: int = 8192,
     safety=None,
 ) -> str:
+    """
+    Calls Gemini to generate the report. Returns markdown string (non-empty),
+    or raises RuntimeError on failure. Uses dict-based payloads to avoid SDK type churn.
+    """
     client = genai.Client(api_key=api_key)
-    system_part = types.Part.from_text(system_prompt)
-    user_part = types.Part.from_text(user_prompt)
 
-    config = types.GenerateContentConfig(
-        temperature=temperature,
-        top_p=top_p,
-        max_output_tokens=max_output_tokens,
-        safety_settings=safety or [],
-        response_mime_type="text/markdown",
-    )
+    config = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_output_tokens": max_output_tokens,
+        "safety_settings": safety or [
+            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+        ],
+        "response_mime_type": "text/markdown",
+    }
+
+    req = {
+        "model": model_name,
+        "config": config,
+        "contents": [
+            {"role": "system", "parts": [{"text": system_prompt}]},
+            {"role": "user",   "parts": [{"text": user_prompt}]},
+        ],
+    }
 
     start = time.time()
     try:
-        req = types.GenerateContentRequest(
-            model=model_name,
-            config=config,
-            contents=[
-                types.Content(role="system", parts=[system_part]),
-                types.Content(role="user", parts=[user_part]),
-            ],
-        )
         if stream:
             log(f"Invoking model (streaming): {model_name}")
             chunks = []
             for evt in client.models.generate_content_stream(req):
                 if evt.type == "content":
+                    # parts may have inline_data (markdown) or text
                     for part in evt.content.parts:
                         if getattr(part, "inline_data", None) and part.inline_data.mime_type == "text/markdown":
                             chunks.append(part.inline_data.data.decode("utf-8", errors="replace"))
@@ -290,6 +278,7 @@ def generate_report(
             log(f"Invoking model (non-stream): {model_name}")
             resp = client.models.generate_content(req)
             output = ""
+            # prefer markdown inline_data; fallback to text
             for part in resp.candidates[0].content.parts:
                 if getattr(part, "inline_data", None) and part.inline_data.mime_type == "text/markdown":
                     output += part.inline_data.data.decode("utf-8", errors="replace")
@@ -305,24 +294,25 @@ def generate_report(
         raise RuntimeError("Model returned empty content")
     return output
 
-# -------- Main -------- #
+
+# ---------- Main ---------- #
 
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="CTA Threat Hunt Report generator")
-    parser.add_argument("--system-file", required=True)
+    parser.add_argument("--system-file", required=True, help="Path to system prompt file (text)")
     parser.add_argument("--prompt", required=True, help="Idea / user prompt text")
-    parser.add_argument("--attach", nargs="*", default=[], help="Attachment file paths")
+    parser.add_argument("--attach", nargs="*", default=[], help="Paths to attachment files")
     parser.add_argument("--output", required=True, help="Output markdown path")
-    parser.add_argument("--model", default="gemini-1.5-pro")
+    parser.add_argument("--model", default="gemini-1.5-pro", help="Model name")
     parser.add_argument("--no-stream", action="store_true", help="Disable streaming")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-output-tokens", type=int, default=8192)
 
-    # New validation controls
+    # Validation controls
     parser.add_argument("--min-section-words", type=int, default=80, help="Minimum words per required section")
-    parser.add_argument("--strict-sections", action="store_true", help="Fail if required sections missing/short (default on)")
-    parser.add_argument("--skeleton-fallback", action="store_true", help="If validation fails, append skeleton sections instead of failing")
+    parser.add_argument("--strict-sections", action="store_true", help="Fail if required sections missing/short")
+    parser.add_argument("--skeleton-fallback", action="store_true", help="Append skeleton sections instead of failing")
     parser.add_argument("--require-attack-ids", action="store_true", help="Require ATT&CK IDs in output if present in idea")
 
     args = parser.parse_args(argv)
@@ -362,9 +352,7 @@ def main(argv: List[str]) -> int:
             temperature=args.temperature,
             top_p=args.top_p,
             max_output_tokens=args.max_output_tokens,
-            safety=[
-                types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_MEDIUM_AND_ABOVE"),
-            ],
+            safety=None,  # we already set a default safety in generate_report
         )
     except Exception as e:
         log(f"ERROR: {e}")
@@ -388,16 +376,15 @@ def main(argv: List[str]) -> int:
         log("CTA section validation failed:")
         for e in errors:
             log(f"  - {e}")
-        if args.skeleton-fallback:
-            # Add skeletons for missing sections and re-validate word counts
+        if args.skeleton_fallback:
             missing = [msg.replace("Missing required section: ", "") for msg in errors if msg.startswith("Missing required section: ")]
-            output_md = add_missing_sections(output_md, idea, args.min_section_words, missing)
-            # We don't force word count after skeleton; the skeleton is a TODO.
+            output_md = add_missing_sections(output_md, idea, missing)
             log("Applied skeleton fallback for missing sections.")
+        elif args.strict_sections:
+            return 7
         else:
-            # If strict-sections is set (default on when flag present), fail
-            if args.strict_sections or True:
-                return 7
+            # If neither strict nor fallback is set, we continue (soft warning)
+            log("Continuing without strict enforcement.")
 
     # Write output
     try:
@@ -408,7 +395,7 @@ def main(argv: List[str]) -> int:
         log(f"ERROR: Failed to write output to {args.output}: {e}")
         return 6
 
-    # Emit summary to STDOUT (handy in CI logs)
+    # Emit short summary to STDOUT for CI logs
     print(json.dumps({
         "status": "ok",
         "output_path": args.output,
@@ -422,10 +409,10 @@ def main(argv: List[str]) -> int:
     log(f"SUCCESS: Wrote report to {args.output}")
     return 0
 
+
 if __name__ == "__main__":
     try:
         code = main(sys.argv[1:])
         sys.exit(code)
     except KeyboardInterrupt:
         log("Interrupted by user")
-        sys.exit(130)
