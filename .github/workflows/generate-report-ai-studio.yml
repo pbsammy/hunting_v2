@@ -13,7 +13,8 @@ permissions:
 jobs:
   generate-report:
     runs-on: ubuntu-latest
-    # environment: prod  # Uncomment if you use environment-scoped secrets
+    # Uncomment if you use environment-scoped secrets:
+    # environment: prod
 
     steps:
       # 1) Checkout repo
@@ -27,73 +28,48 @@ jobs:
           python-version: '3.11'
 
       # 3) Install dependencies (pin google-genai >= 1.62.0)
+      #    If you already have requirements.txt, we append/override google-genai.
       - name: Install dependencies
         shell: bash
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
+            # Ensure we install a fixed SDK or newer
             sed -i '/^google-genai/d' requirements.txt || true
             echo 'google-genai>=1.62.0' >> requirements.txt
             pip install -r requirements.txt
           else
-            pip install "google-genai>=1.62.0"
+            pip install google-genai>=1.62.0
           fi
 
-      # 4) Resolve system prompt (prefer prompts/hunt_system_prompt.txt; fall back to root; else create)
-      - name: Resolve system prompt
-        id: prompt
+      # 4) (Optional) Preflight checks for inputs & attachments
+      - name: Preflight - verify inputs
         shell: bash
         run: |
-          set -euo pipefail
-          CANDIDATE1="prompts/hunt_system_prompt.txt"
-          CANDIDATE2="hunt_system_prompt.txt"
-
-          if [ -f "$CANDIDATE1" ]; then
-            echo "PROMPT_PATH=$CANDIDATE1" >> "$GITHUB_ENV"
-            echo "Found prompt at $CANDIDATE1"
-          elif [ -f "$CANDIDATE2" ]; then
-            echo "PROMPT_PATH=$CANDIDATE2" >> "$GITHUB_ENV"
-            echo "Found prompt at $CANDIDATE2"
-          else
-            echo "Prompt not found; creating fallback at $CANDIDATE1"
-            mkdir -p prompts
-            cat > "$CANDIDATE1" << 'EOF'
-You are a senior cybersecurity analyst on the Cyber Threat Analytics (CTA) team. Your mission is to create a detailed and professional threat hunt report. The report should be based on the provided context about a specific threat.
-
-Your tone must be formal, authoritative, and objective. Use clear, concise language appropriate for a technical audience, including security leadership and incident responders.
-
-Structure your output to fit seamlessly into the provided Markdown template. Generate only the content for the specified sections. Do not generate the title or the tables at the top of the document.
-EOF
-            echo "PROMPT_PATH=$CANDIDATE1" >> "$GITHUB_ENV"
-          fi
-
-      # 5) Prepare optional attachments (safe defaults)
-      - name: Prepare attachments
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p output
+          test -f reports/request_prompt.txt || { echo "::error title=Missing prompt::reports/request_prompt.txt not found"; exit 1; }
+          test -f reports/system.md || { echo "::warning title=System file missing::reports/system.md not found (continuing)"; }
+          # Optional attachments (don’t fail hard): create placeholders if needed
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
 
-      # 6) Run the report generator with the inline workaround
+      # 5) Run the report generator with the inline workaround
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_INLINE_SYSTEM: "1"   # Remove after SDK upgrade verified
+          GEMINI_INLINE_SYSTEM: "1"   # ← enable inline fallback (remove after SDK upgrade is verified)
         run: |
-          set -euo pipefail
           python app/main_ai_studio.py \
-            --prompt-file "${PROMPT_PATH}" \
+            --prompt-file reports/request_prompt.txt \
+            --system-file reports/system.md \
             --attach output/logs.txt output/findings.json \
             --no-stream \
             --output output/threat_hunt_report.md
 
-      # 7) Upload the generated artifact (v4 action)
+      # 6) Upload the generated artifact (uses the supported v4+ action)
       - name: Upload Threat Hunt Report artifact
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report
-          path: output/threat_hunt_report.md
-          retention-days: 30
+          path: |
+            output/threat_hunt_report.md
+          retention-days: 30  # adjust as needed
