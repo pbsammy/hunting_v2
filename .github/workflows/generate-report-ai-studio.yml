@@ -30,6 +30,7 @@ jobs:
       - name: Install dependencies
         shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
             sed -i '/^google-genai/d' requirements.txt || true
@@ -39,13 +40,12 @@ jobs:
             pip install "google-genai>=1.62.0"
           fi
 
-      # 4) Detect or create the system prompt file
+      # 4) Resolve system prompt (prefer prompts/hunt_system_prompt.txt; fall back to root; else create)
       - name: Resolve system prompt
         id: prompt
         shell: bash
         run: |
           set -euo pipefail
-          # Candidate locations
           CANDIDATE1="prompts/hunt_system_prompt.txt"
           CANDIDATE2="hunt_system_prompt.txt"
 
@@ -72,6 +72,7 @@ EOF
       - name: Prepare attachments
         shell: bash
         run: |
+          set -euo pipefail
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
@@ -80,8 +81,9 @@ EOF
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_INLINE_SYSTEM: "1"   # remove after SDK upgrade is verified
+          GEMINI_INLINE_SYSTEM: "1"   # Remove after SDK upgrade verified
         run: |
+          set -euo pipefail
           python app/main_ai_studio.py \
             --prompt-file "${PROMPT_PATH}" \
             --attach output/logs.txt output/findings.json \
