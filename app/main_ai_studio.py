@@ -4,7 +4,7 @@ Threat Hunt Report generator using the Google Gen AI SDK (google.genai).
 
 Key features:
 - Single-turn generation with a structured prompt (no chat message dicts).
-- Persona/behavior instruction: top-level system_instruction (preferred), or inline fallback.
+- Persona/behavior instruction via top-level `system_instruction` (REST v1 expects snake_case).
 - Optional attachments via client.files.upload() (e.g., logs or artifacts).
 - Streaming and non-streamed generation supported.
 - API version pinned to v1 for stability.
@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import mimetypes
 import os
 import sys
 import time
@@ -61,6 +62,10 @@ def build_client(api_key_env: str = DEFAULT_API_KEY_ENV) -> genai.Client:
     client = genai.Client(api_key=api_key, http_options=http_opts)
     return client
 
+def guess_mime(path: str) -> str:
+    mt, _ = mimetypes.guess_type(path)
+    return mt or "application/octet-stream"
+
 def upload_attachments(client: genai.Client, paths: List[str]) -> List[types.Part]:
     """
     Upload files and return Parts that can be included in the user Content.
@@ -70,8 +75,14 @@ def upload_attachments(client: genai.Client, paths: List[str]) -> List[types.Par
         if not os.path.exists(p):
             raise FileNotFoundError(f"Attachment not found: {p}")
         LOG.info("Uploading attachment: %s", p)
-        fh = client.files.upload(path=p)         # returns a File handle
-        parts.append(types.Part.from_file(fh))   # wrap as Part for contents
+
+        # OPEN THE FILE AND PASS IT AS 'file=' (NOT 'path=')
+        with open(p, "rb") as fh:
+            uploaded = client.files.upload(file=fh, mime_type=guess_mime(p))
+
+        # Wrap the uploaded file as a Part for the contents payload
+        parts.append(types.Part.from_file(uploaded))
+
     return parts
 
 def do_generate(
@@ -98,7 +109,6 @@ def do_generate(
         if isinstance(contents, list) and contents and hasattr(contents[0], "parts"):
             # Prepend the system instruction text to the first user part
             system_text = f"System instruction:\n{system_instruction}\n\n"
-            # If first part is text, prepend; else insert a new text part at position 0
             first_parts = contents[0].parts
             if first_parts and hasattr(first_parts[0], "text") and first_parts[0].text:
                 first_parts[0].text = system_text + first_parts[0].text
@@ -188,10 +198,10 @@ def resolve_text_arg(arg_value: Optional[str], file_path: Optional[str]) -> Opti
 def run_smoke_test() -> None:
     LOG.info("Running smoke test...")
     client = build_client()
-    # Simple single user message; no explicit system_instruction to avoid SDK casing issues
     resp = client.models.generate_content(
         model=DEFAULT_MODEL,
         contents=[types.Content(role="user", parts=[types.Part.from_text("Say hello in one sentence.")])],
+        system_instruction="Respond concisely.",
     )
     txt = getattr(resp, "text", "")
     assert txt, "Smoke test failed: empty response.text"
@@ -232,55 +242,3 @@ def main() -> int:
     if not generation_config:
         generation_config = None
 
-    # Build contents (single user message with text + optional attachments)
-    user_parts: List[types.Part] = [types.Part.from_text(text=user_prompt)]
-
-    # Attachments (optional)
-    try:
-        if args.attach:
-            attach_parts = upload_attachments(client, args.attach)
-            user_parts.extend(attach_parts)
-    except Exception as e:
-        LOG.error("Attachment upload error: %s", repr(e))
-        return 2
-
-    contents: List[types.Content] = [types.Content(role="user", parts=user_parts)]
-
-    # Generate
-    try:
-        resp = do_generate(
-            client=client,
-            model_name=args.model,
-            contents=contents,
-            system_instruction=system_instruction,
-            generation_config=generation_config,
-            stream=not args.no_stream,
-        )
-    except Exception as e:
-        LOG.error("Generation error: %s", repr(e))
-        return 3
-
-    # Output
-    final_text = ""
-    if hasattr(resp, "__iter__"):
-        # Streaming iterator
-        final_text = accumulate_stream(resp)
-    else:
-        # Non-streamed object
-        final_text = getattr(resp, "text", "") or ""
-        print(final_text)
-
-    if args.output:
-        try:
-            with open(args.output, "w", encoding="utf-8") as f:
-                f.write(final_text)
-            LOG.info("Wrote output to: %s", args.output)
-        except Exception as e:
-            LOG.error("Failed to write output: %s", repr(e))
-            return 4
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
