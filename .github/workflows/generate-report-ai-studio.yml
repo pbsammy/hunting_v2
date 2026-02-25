@@ -39,16 +39,16 @@ jobs:
             echo 'google-genai>=1.62.0' >> requirements.txt
             pip install -r requirements.txt
           else
-            pip install google-genai>=1.62.0
+            pip install "google-genai>=1.62.0"
           fi
 
-      # 4) (Optional) Preflight checks for inputs & attachments
+      # 4) Preflight: verify actual prompt file (root-level hunt_system_prompt.txt)
       - name: Preflight - verify inputs
         shell: bash
         run: |
-          test -f reports/request_prompt.txt || { echo "::error title=Missing prompt::reports/request_prompt.txt not found"; exit 1; }
-          test -f reports/system.md || { echo "::warning title=System file missing::reports/system.md not found (continuing)"; }
+          test -f hunt_system_prompt.txt || { echo "::error title=Missing prompt::hunt_system_prompt.txt not found"; exit 1; }
           # Optional attachments (don’t fail hard): create placeholders if needed
+          mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
 
@@ -59,13 +59,12 @@ jobs:
           GEMINI_INLINE_SYSTEM: "1"   # ← enable inline fallback (remove after SDK upgrade is verified)
         run: |
           python app/main_ai_studio.py \
-            --prompt-file reports/request_prompt.txt \
-            --system-file reports/system.md \
+            --prompt-file hunt_system_prompt.txt \
             --attach output/logs.txt output/findings.json \
             --no-stream \
             --output output/threat_hunt_report.md
 
-      # 6) Upload the generated artifact (uses the supported v4+ action)
+      # 6) Upload the generated artifact (uses the supported v4 action)
       - name: Upload Threat Hunt Report artifact
         uses: actions/upload-artifact@v4
         with:
