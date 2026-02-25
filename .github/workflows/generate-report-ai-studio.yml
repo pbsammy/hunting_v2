@@ -19,7 +19,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Debug workspace (keep for now; you can remove later)
+      # 2) Debug workspace (optional; helpful while stabilizing)
       - name: Debug workspace
         shell: bash
         run: |
@@ -34,7 +34,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 4) Install dependencies (SDK >= 1.62.0; runner shows 1.64.0 in your logs)
+      # 4) Install dependencies (pin google-genai >= 1.62.0)
       - name: Install dependencies
         shell: bash
         run: |
@@ -48,38 +48,46 @@ jobs:
             pip install "google-genai>=1.62.0"
           fi
 
-      # 5) Preflight - verify inputs and prepare attachments
+      # 5) Preflight - verify both prompts & prepare attachments
       - name: Preflight - verify inputs
         shell: bash
         run: |
           set -euo pipefail
           test -f prompts/hunt_system_prompt.txt \
             || { echo "::error::prompts/hunt_system_prompt.txt NOT FOUND"; exit 1; }
+          test -f prompts/hunt_user_prompt.md \
+            || { echo "::error::prompts/hunt_user_prompt.md NOT FOUND"; exit 1; }
+
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
 
-      # 6) Run report generator (inline workaround still enabled)
+          echo "System prompt bytes: $(wc -c < prompts/hunt_system_prompt.txt)"
+          echo "User prompt bytes:   $(wc -c < prompts/hunt_user_prompt.md)"
+
+      # 6) Run report generator (no inline workaround needed on new SDK)
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_INLINE_SYSTEM: "1"   # Remove when stable (SDK now 1.64.0)
         run: |
           set -euxo pipefail
           OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
+
+          # Generate the report
           python app/main_ai_studio.py \
-            --prompt-file prompts/hunt_system_prompt.txt \
+            --system-file prompts/hunt_system_prompt.txt \
+            --prompt-file prompts/hunt_user_prompt.md \
             --attach output/logs.txt output/findings.json \
             --no-stream \
             --output "${OUT_PATH}"
 
-          # Fallback: if the Python step did not produce the file, create a minimal one
-          if [ ! -f "${OUT_PATH}" ]; then
-            echo "::warning::Report not created by generator; creating fallback file."
+          # Fallback: if the generator produced no file (or zero length), create a minimal file
+          if [ ! -s "${OUT_PATH}" ]; then
+            echo "::warning::Report not created or empty; creating fallback file."
             {
               echo "# Threat Hunt Report"
               echo
-              echo "_No generated content was produced. Check previous step logs for errors or empty model response._"
+              echo "_No generated content was produced. Check generation logs for details (model output may have been empty)._"
               echo
               echo "## Attachments included"
               echo "- logs.txt"
@@ -96,9 +104,10 @@ jobs:
           test -f output/threat_hunt_report.md \
             || { echo "::error::Threat hunt report NOT generated"; exit 1; }
 
-      # 8) Upload artifact
+      # 8) Upload artifact (supported v4 action)
       - name: Upload Threat Hunt Report artifact
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report
           path: output/threat_hunt_report.md
+          retention-days: 30
