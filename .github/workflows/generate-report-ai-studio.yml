@@ -49,18 +49,15 @@ jobs:
 
         PROMPT
 
-    - name: Generate Report
-      env:
-        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-      run: |
-        python app/main_ai_studio.py \
-          --no-stream \
-          --system "You are a senior threat intelligence and threat hunting analyst. Produce detailed, accurate, highly structured markdown reports." \
-          --prompt-file prompt.txt \
-          --output threat_hunt_report.md
 
-    - name: Upload Report Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: threat-hunt-report
-        path: threat_hunt_report.md
+- name: Run report generator
+  env:
+    GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+    GEMINI_INLINE_SYSTEM: "1"   # ← enable inline fallback
+  run: |
+    python app/main_ai_studio.py \
+      --prompt-file reports/request_prompt.txt \
+      --system-file reports/system.md \
+      --no-stream \
+      --output output/threat_hunt_report.md
+
