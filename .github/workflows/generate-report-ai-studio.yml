@@ -1,63 +1,75 @@
 name: Generate Threat Hunt Report
 
 on:
-  workflow_dispatch:
-    inputs:
-      topic:
-        description: "Threat topic or CVE (e.g., CVE-2023-23397, Log4Shell)"
-        required: true
+  workflow_dispatch:  # manual trigger
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
+    # Uncomment if you use environment-scoped secrets:
+    # environment: prod
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      # 1) Checkout repo
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.11'
+      # 2) Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install dependencies
-      run: |
-        pip install --upgrade pip
-        pip install google-genai
+      # 3) Install dependencies (pin google-genai >= 1.62.0)
+      #    If you already have requirements.txt, we append/override google-genai.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then
+            # Ensure we install a fixed SDK or newer
+            sed -i '/^google-genai/d' requirements.txt || true
+            echo 'google-genai>=1.62.0' >> requirements.txt
+            pip install -r requirements.txt
+          else
+            pip install google-genai>=1.62.0
+          fi
 
-    - name: Build structured prompt
-      run: |
-        cat > prompt.txt << 'PROMPT'
-        Generate a complete, professional threat hunting report for the following topic:
+      # 4) (Optional) Preflight checks for inputs & attachments
+      - name: Preflight - verify inputs
+        shell: bash
+        run: |
+          test -f reports/request_prompt.txt || { echo "::error title=Missing prompt::reports/request_prompt.txt not found"; exit 1; }
+          test -f reports/system.md || { echo "::warning title=System file missing::reports/system.md not found (continuing)"; }
+          # Optional attachments (don’t fail hard): create placeholders if needed
+          [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
+          [[ -f output/findings.json ]] || echo "{}" > output/findings.json
 
-        Topic: ${{ github.event.inputs.topic }}
+      # 5) Run the report generator with the inline workaround
+      - name: Run report generator
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_INLINE_SYSTEM: "1"   # ← enable inline fallback (remove after SDK upgrade is verified)
+        run: |
+          python app/main_ai_studio.py \
+            --prompt-file reports/request_prompt.txt \
+            --system-file reports/system.md \
+            --attach output/logs.txt output/findings.json \
+            --no-stream \
+            --output output/threat_hunt_report.md
 
-        Please include the following sections automatically:
-        - Executive Summary
-        - Threat Overview
-        - CVE Details (if the topic is a CVE)
-        - Attack Vector Analysis
-        - Hypothesized Adversary Behavior
-        - Detection Hypotheses
-        - Data Sources Needed
-        - Detailed Hunting Procedure
-        - Detection Logic and Opportunities
-        - MITRE ATT&CK Mapping
-        - Indicators (IOCs/IOAs)
-        - Recommendations
-        - Reference Links
-
-        PROMPT
-
-
-- name: Run report generator
-  env:
-    GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-    GEMINI_INLINE_SYSTEM: "1"   # ← enable inline fallback
-  run: |
-    python app/main_ai_studio.py \
-      --prompt-file reports/request_prompt.txt \
-      --system-file reports/system.md \
-      --no-stream \
-      --output output/threat_hunt_report.md
-
+      # 6) Upload the generated artifact (uses the supported v4+ action)
+      - name: Upload Threat Hunt Report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: threat-hunt-report
+          path: |
+            output/threat_hunt_report.md
+          retention-days: 30  # adjust as needed
