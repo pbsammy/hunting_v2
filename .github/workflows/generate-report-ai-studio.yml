@@ -19,10 +19,10 @@ jobs:
   generate-report:
     runs-on: ubuntu-latest
 
+    # Normalize IDEA across event types:
+    # - For workflow_dispatch: use the provided input
+    # - For push: attempt to parse "idea: ..." from the commit message; else use a placeholder
     env:
-      # Normalize IDEA across event types:
-      # - For workflow_dispatch: use the provided input
-      # - For push: try to parse "idea: ..." from the commit message, else use a default placeholder
       IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || '' }}
 
     steps:
@@ -38,7 +38,6 @@ jobs:
           set -euo pipefail
           if [ -z "${IDEA:-}" ]; then
             COMMIT_MSG="$(git log -1 --pretty=%B)"
-            # Try to extract "idea: ..." from commit message
             EXTRACTED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^[[:space:]]*[Ii][Dd][Ee][Aa][[:space:]]*:[[:space:]]*//p' | head -n1)"
             if [ -n "$EXTRACTED" ]; then
               echo "Found IDEA in commit message: $EXTRACTED"
@@ -96,22 +95,23 @@ jobs:
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
           echo "Idea: '${IDEA}'"
 
-      # 7) Generate report (system + idea)
+      # 7) Run report generator (STRICT: fail on missing/short sections; require ATT&CK IDs when present)
       - name: Run report generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        shell: bash
         run: |
           set -euxo pipefail
           OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
 
-          # Pass system prompt file AND the IDEA as the user prompt
           python app/main_ai_studio.py \
             --system-file prompts/hunt_system_prompt.txt \
             --prompt "${IDEA}" \
             --attach output/logs.txt output/findings.json \
             --no-stream \
-            --output "${OUT_PATH}"
+            --output "${OUT_PATH}" \
+            --min-section-words 80 \
+            --strict-sections \
+            --require-attack-ids
 
           # Echo result size to logs (helps debug path/content issues)
           if [ -f "${OUT_PATH}" ]; then
