@@ -10,17 +10,6 @@ Exit codes:
   5 - model returned empty / too small content
   6 - write failure (unable to write output file)
   7 - section validation failed (missing/short sections or ATT&CK IDs not propagated)
-
-Usage example:
-  python app/main_ai_studio.py \
-    --system-file prompts/hunt_system_prompt.txt \
-    --prompt "T1578 cloud abuse — malicious use of workload identities" \
-    --attach output/logs.txt output/findings.json \
-    --no-stream \
-    --output output/threat_hunt_report.md \
-    --min-section-words 80 \
-    --strict-sections \
-    --require-attack-ids
 """
 
 import argparse
@@ -33,8 +22,7 @@ import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
-# Google Gen AI SDK
-# We expect google-genai>=1.62.0, tested on 1.64.x
+# Google Gen AI SDK (tested with google-genai==1.64.0)
 from google import genai
 
 # ---------- Utilities ---------- #
@@ -82,28 +70,11 @@ def log_sdk_versions() -> None:
 
 RE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
 
-CANONICAL_SECTIONS = [
-    "Background",
-    "Hypothesis",
-    "Analysis",
-    # either "Suspicious Activity Hits" OR "Findings" must be present
-    "Suspicious Activity Hits",
-    "Findings",
-    "Recommendations",
-    "Additional Research",
-    "Appendix",   # optional
-    "Resources",
-]
-
 SECTION_ALIASES = {
     "Suspicious Activity Hits": {"Suspicious Activity Hits", "Suspicious Activity", "Findings"},
     "Findings": {"Findings", "Suspicious Activity Hits", "Suspicious Activity"},
     "Resources": {"Resources", "References", "Further Reading"},
 }
-
-def normalize_heading(text: str) -> str:
-    t = re.sub(r"[^A-Za-z0-9\s]", "", text).strip().lower()
-    return t
 
 def find_headings(md: str) -> List[Tuple[str, int]]:
     return [(m.group(1).strip(), m.start()) for m in RE_HEADING.finditer(md)]
@@ -228,6 +199,13 @@ def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
 
 # ---------- Model Call (keyword-only; stream & non-stream) ---------- #
 
+def _build_contents(system_prompt: str, user_prompt: str) -> List[Dict]:
+    """Embed system prompt safely as first user message for SDKs without system_instruction."""
+    return [
+        {"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"}]},
+        {"role": "user", "parts": [{"text": user_prompt}]},
+    ]
+
 def generate_report(
     api_key: str,
     system_prompt: str,
@@ -242,7 +220,7 @@ def generate_report(
     """
     Calls Gemini to generate the report. Returns markdown string (non-empty),
     or raises RuntimeError on failure. Uses keyword-only calls compatible with
-    recent google-genai versions.
+    google-genai 1.64.0 (no system_instruction).
     """
     client = genai.Client(api_key=api_key)
 
@@ -250,12 +228,13 @@ def generate_report(
         "temperature": temperature,
         "top_p": top_p,
         "max_output_tokens": max_output_tokens,
-        # Prefer markdown responses when supported:
         "response_mime_type": "text/markdown",
     }
     safety_settings = safety or [
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
     ]
+
+    contents = _build_contents(system_prompt, user_prompt)
 
     start = time.time()
     try:
@@ -264,14 +243,12 @@ def generate_report(
             chunks: List[str] = []
             stream_iter = client.models.generate_content_stream(
                 model=model_name,
-                system_instruction=system_prompt,
-                contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+                contents=contents,
                 generation_config=generation_config,
                 safety_settings=safety_settings,
             )
 
             for item in stream_iter:
-                # Newer SDK exposes .text on each stream item; fallback to parts if needed
                 if getattr(item, "text", None):
                     chunks.append(item.text)
                     continue
@@ -289,27 +266,22 @@ def generate_report(
             log(f"Invoking model (non-stream): {model_name}")
             resp = client.models.generate_content(
                 model=model_name,
-                system_instruction=system_prompt,
-                contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+                contents=contents,
                 generation_config=generation_config,
                 safety_settings=safety_settings,
             )
-            # Prefer unified .text when available
             output = (getattr(resp, "text", "") or "").strip()
-            if not output:
-                # Fallback to parts parsing
-                if getattr(resp, "candidates", None):
-                    parts = getattr(resp.candidates[0].content, "parts", []) or []
-                    buf: List[str] = []
-                    for part in parts:
-                        if getattr(part, "text", None):
-                            buf.append(part.text)
-                        elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/markdown", "text/plain"):
-                            buf.append(part.inline_data.data.decode("utf-8", errors="replace"))
-                    output = "".join(buf).strip()
+            if not output and getattr(resp, "candidates", None):
+                parts = getattr(resp.candidates[0].content, "parts", []) or []
+                buf: List[str] = []
+                for part in parts:
+                    if getattr(part, "text", None):
+                        buf.append(part.text)
+                    elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/markdown", "text/plain"):
+                        buf.append(part.inline_data.data.decode("utf-8", errors="replace"))
+                output = "".join(buf).strip()
 
     except Exception as e:
-        # Surface the SDK error; the caller handles exit code
         raise RuntimeError(f"Generation failed: {e}") from e
     finally:
         log(f"Model call duration: {time.time() - start:.2f}s")
@@ -345,7 +317,6 @@ def main(argv: List[str]) -> int:
         log("ERROR: GEMINI_API_KEY not set")
         return 2
 
-    # Log SDK versions for CI troubleshooting
     log_sdk_versions()
 
     # Read system prompt
@@ -378,7 +349,7 @@ def main(argv: List[str]) -> int:
             temperature=args.temperature,
             top_p=args.top_p,
             max_output_tokens=args.max_output_tokens,
-            safety=None,  # we already set a default safety in generate_report
+            safety=None,
         )
     except Exception as e:
         log(f"ERROR: {e}")
@@ -409,7 +380,6 @@ def main(argv: List[str]) -> int:
         elif args.strict_sections:
             return 7
         else:
-            # If neither strict nor fallback is set, we continue (soft warning)
             log("Continuing without strict enforcement.")
 
     # Write output
