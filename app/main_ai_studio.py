@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """
-CTA Threat Hunt Report generator — compatible with google-genai SDK v1.65.0.
+CTA Threat Hunt Report generator — template-driven and resilient to google-genai SDK changes.
+
+Outputs a fully formatted Markdown report by:
+1) Requesting structured JSON from Gemini (sections + metadata)
+2) Validating & normalizing sections
+3) Rendering Jinja2 template to match CTA format
 
 Exit codes:
   1 - invalid CLI usage / missing required args
   2 - missing GEMINI_API_KEY
-  3 - system prompt file or template missing/unreadable
+  3 - system prompt file missing/unreadable
   4 - generation error (API call failed)
   5 - model returned empty / too small content
   6 - write failure (unable to write output file)
@@ -15,14 +20,17 @@ Exit codes:
 import argparse
 import os
 import sys
+import time
 import json
 import re
 import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
+# Third-party
 from google import genai
 from google.genai.errors import ClientError
+from jinja2 import Template
 
 # ---------- Utilities ---------- #
 
@@ -34,16 +42,16 @@ def log(msg: str) -> None:
 def read_text_file(path: str, max_bytes: int = 2_000_000) -> Optional[str]:
     try:
         if not os.path.isfile(path):
-            log(f"WARNING: file not found: {path}")
+            log(f"WARNING: attachment not found: {path}")
             return None
         size = os.path.getsize(path)
         if size > max_bytes:
-            log(f"WARNING: file too large ({size} bytes), truncating to {max_bytes}: {path}")
+            log(f"WARNING: attachment too large ({size} bytes), truncating to {max_bytes}: {path}")
         with open(path, "rb") as f:
             data = f.read(max_bytes)
         return data.decode("utf-8", errors="replace")
     except Exception as e:
-        log(f"WARNING: failed to read file {path}: {e}")
+        log(f"WARNING: failed to read attachment {path}: {e}")
         return None
 
 def ensure_parent_dir(path: str) -> None:
@@ -62,11 +70,12 @@ def log_sdk_versions() -> None:
 # ---------- CTA Section Rules & Validation ---------- #
 
 RE_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+(.+?)\s*$", re.MULTILINE)
-SECTION_ALIASES = {
-    "Suspicious Activity Hits": {"Suspicious Activity Hits", "Suspicious Activity", "Findings"},
-    "Findings": {"Findings", "Suspicious Activity Hits", "Suspicious Activity"},
-    "Resources": {"Resources", "References", "Further Reading"},
-}
+
+SECTION_KEYS = [
+    "BACKGROUND", "HYPOTHESIS", "ANALYSIS",
+    "FINDINGS", "RECOMMENDATIONS", "ADDITIONAL_RESEARCH",
+    "APPENDIX", "RESOURCES"
+]
 
 def find_headings(md: str) -> List[Tuple[str, int]]:
     return [(m.group(1).strip(), m.start()) for m in RE_HEADING.finditer(md)]
@@ -78,29 +87,8 @@ def section_spans(md: str) -> Dict[str, str]:
         end_idx = hits[i + 1][1] if i + 1 < len(hits) else len(md)
         body = md[start_idx:end_idx]
         body = re.sub(r"^\s{0,3}#{1,6}\s+.*?\n", "", body, count=1, flags=re.MULTILINE).strip()
-        sections[h_text] = body
+        sections[h_text.lower()] = body
     return sections
-
-def match_required_sections(found: Dict[str, str]) -> Dict[str, Optional[str]]:
-    present_map: Dict[str, Optional[str]] = {}
-    for canonical in ["Background", "Hypothesis", "Analysis", "Recommendations", "Additional Research", "Appendix", "Resources"]:
-        if canonical in found:
-            present_map[canonical] = canonical
-            continue
-        if canonical == "Resources":
-            variants = SECTION_ALIASES["Resources"]
-            matched = next((v for v in variants if v in found), None)
-            present_map[canonical] = matched
-            continue
-        present_map[canonical] = None
-    findings_present = None
-    for variant in SECTION_ALIASES["Findings"]:
-        if variant in found:
-            findings_present = variant
-            break
-    present_map["Suspicious Activity Hits"] = findings_present
-    present_map["Findings"] = findings_present
-    return present_map
 
 def count_words(text: str) -> int:
     return len([w for w in re.findall(r"\b\w+\b", text or "")])
@@ -108,127 +96,264 @@ def count_words(text: str) -> int:
 def extract_attack_ids(s: str) -> List[str]:
     return sorted(set(re.findall(r"\bT\d{4}\b", s)))
 
-def validate_cta(md: str, idea: str, min_words: int = 80, require_attack_ids: bool = True) -> Tuple[bool, List[str], Dict[str, int]]:
-    sections = section_spans(md)
-    present_map = match_required_sections(sections)
+def validate_cta(sections: Dict[str, str], idea: str, min_words: int = 80, require_attack_ids: bool = True) -> Tuple[bool, List[str], Dict[str, int]]:
     errors = []
     word_counts = {}
-    if present_map["Findings"] is None and present_map["Suspicious Activity Hits"] is None:
+
+    # Required presence check
+    required = ["background", "hypothesis", "analysis", "recommendations", "additional research", "resources"]
+    # Findings is interchangeable with Suspicious Activity Hits
+    findings_ok = sections.get("findings") or sections.get("suspicious activity hits")
+
+    if not findings_ok:
         errors.append("Missing required section: Findings or Suspicious Activity Hits")
-    required = ["Background", "Hypothesis", "Analysis", "Recommendations", "Additional Research", "Resources"]
-    for sec in required:
-        matched = present_map.get(sec)
-        if not matched:
-            errors.append(f"Missing required section: {sec}")
+
+    for key in required:
+        body = sections.get(key, "")
+        if not body.strip():
+            errors.append(f"Missing required section: {key.title()}")
         else:
-            body = sections.get(matched, "")
             wc = count_words(body)
-            word_counts[sec] = wc
+            word_counts[key.title()] = wc
             if wc < min_words:
-                errors.append(f"Section '{sec}' is too short ({wc} words < {min_words}).")
-    if present_map.get("Appendix"):
-        body = sections.get(present_map["Appendix"], "")
-        word_counts["Appendix"] = count_words(body)
+                errors.append(f"Section '{key.title()}' is too short ({wc} words < {min_words}).")
+
+    # Optional appendix word count
+    if sections.get("appendix", ""):
+        word_counts["Appendix"] = count_words(sections["appendix"])
+
+    # ATT&CK ID propagation (if present in idea)
     if require_attack_ids:
         idea_ids = extract_attack_ids(idea)
         if idea_ids:
-            found_ids = extract_attack_ids(md)
+            found_ids = extract_attack_ids("\n".join(sections.values()))
             if not any(i in found_ids for i in idea_ids):
                 errors.append(f"ATT&CK IDs from idea not reflected in output: expected one of {idea_ids}")
+
     return (len(errors) == 0), errors, word_counts
-
-def synthesize_skeleton(sec_name: str, idea: str) -> str:
-    return (
-        f"### {sec_name}\n"
-        f"_This section could not be auto-synthesized. Use the hunt idea_ **{idea}** "
-        f"_to expand this section with behaviors, analytics (KQL/pseudo‑KQL), telemetry hints, ATT&CK mappings, and recommendations._\n"
-    )
-
-def add_missing_sections(md: str, idea: str, missing_sections: List[str]) -> str:
-    additions = []
-    for sec in missing_sections:
-        additions.append(synthesize_skeleton(sec, idea))
-    if additions:
-        md = md.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
-    return md
 
 # ---------- Prompt Assembly ---------- #
 
-def assemble_user_prompt(idea: str, attachments: List[str], template_content: str = "") -> str:
+def assemble_json_prompt(idea: str, attachments: List[str]) -> str:
+    """Ask Gemini to return clean JSON with strict fields."""
     lines = []
-    lines.append(f"THREAT HUNT IDEA:\n{idea.strip()}\n")
-    if template_content:
-        lines.append("\nTEMPLATE:\n")
-        lines.append(template_content)
+    lines.append("You are a DoD Cyber Threat Analytics report generator.")
+    lines.append("Return ONLY JSON (no markdown, no prose).")
+    lines.append("JSON keys MUST be: metadata, sections.")
+    lines.append("metadata keys: HUNT_TITLE, ATTACK_ID, ATTACK_NAME, AUTHOR, CYCLE_NUMBER, DATE, ENVIRONMENT, CLASSIFICATION, REVISION, CUI_CATEGORY, DISSEMINATION, POC.")
+    lines.append("sections keys: BACKGROUND, HYPOTHESIS, ANALYSIS, FINDINGS, RECOMMENDATIONS, ADDITIONAL_RESEARCH, APPENDIX, RESOURCES.")
+    lines.append("Each section MUST be >= 80 words and use authoritative DoD tone. Include ATT&CK mappings in relevant sections.")
+    lines.append("Do NOT include title pages or signature blocks unless in metadata.")
+    lines.append(f"THREAT HUNT IDEA:\n{idea.strip()}")
+
     if attachments:
-        lines.append("\nATTACHMENTS:")
+        lines.append("ATTACHMENTS:")
         for idx, apath in enumerate(attachments, start=1):
             content = read_text_file(apath)
             if content is None:
                 continue
-            size = len(content.encode("utf-8"))
-            ext = os.path.splitext(apath)[1].lower()
-            lines.append(f"\n--- Attachment {idx} ---")
-            lines.append(f"Path: {apath}")
-            lines.append(f"Type: {ext or 'text'} | Size: {size} bytes")
-            lines.append("```")
-            lines.append(content)
-            lines.append("```")
-    lines.append(
-        "\nREQUIREMENTS:\n"
-        "- Produce markdown with explicit H2/H3 headings for: Background, Hypothesis, Analysis, Findings (or Suspicious Activity Hits), Recommendations, Additional Research, Resources. Appendix optional.\n"
-        "- Include technical detail (behaviors, analytics/detection logic, example timelines, telemetry hints, ATT&CK mappings). Use authoritative tone suitable for DoD/enterprise audiences.\n"
-        "- Do NOT include title pages, signature blocks, or CUI markings unless explicitly requested.\n"
-    )
-    return "\n".join(lines).strip()
+            lines.append(f"\n--- Attachment {idx} ---\nPath: {apath}\n```\n{content}\n```")
 
-# ---------- Model Call (updated for GenAI SDK v1.65.0) ---------- #
+    # Final instruction: pure JSON
+    lines.append("\nReturn a single JSON object EXACTLY with 'metadata' and 'sections'.")
+    return "\n".join(lines)
 
-def generate_report(
+# ---------- Model Calls (adaptive to SDK signature + server mime constraints) ---------- #
+
+def _call_generate_content(client, model: str, contents: List[Dict], cfg: Dict, safety):
+    last_err = None
+    try:
+        return client.models.generate_content(model=model, contents=contents, config=cfg, safety_settings=safety)
+    except TypeError as e:
+        last_err = e
+    try:
+        return client.models.generate_content(model=model, contents=contents, config=cfg)
+    except TypeError as e:
+        last_err = e
+    try:
+        return client.models.generate_content(model=model, contents=contents, generation_config=cfg, safety_settings=safety)
+    except TypeError as e:
+        last_err = e
+    try:
+        return client.models.generate_content(model=model, contents=contents, generation_config=cfg)
+    except TypeError as e:
+        last_err = e
+    raise last_err or TypeError("No compatible signature for generate_content")
+
+def _is_mime_error(err: Exception) -> bool:
+    msg = str(err)
+    return "response_mime_type" in msg and "INVALID_ARGUMENT" in msg
+
+def _is_not_found(err: Exception) -> bool:
+    msg = str(err)
+    return "NOT_FOUND" in msg or "404" in msg
+
+def _discover_model_names(client) -> List[str]:
+    names: List[str] = []
+    try:
+        for m in client.models.list():
+            name = getattr(m, "name", None) or getattr(m, "model", None)
+            if name:
+                names.append(str(name))
+    except Exception as e:
+        log(f"WARNING: Failed to list models: {e}")
+    if names:
+        log("Available models for this key:")
+        for n in names:
+            log(f"  - {n}")
+    else:
+        log("WARNING: No models discovered via client.models.list(); will try static fallbacks.")
+    return names
+
+def _candidate_models(client, preferred: Optional[str]) -> List[str]:
+    discovered = _discover_model_names(client)
+    seen = set(discovered)
+    order = list(discovered)
+    if preferred and preferred.strip():
+        pm = preferred.strip()
+        if pm not in seen:
+            order.append(pm)
+        prefixed = f"models/{pm}"
+        if prefixed not in seen:
+            order.append(prefixed)
+    # common aliases
+    for m in ["gemini-1.5-pro-latest", "gemini-1.5-flash", "gemini-1.5-flash-8b", "gemini-1.5-pro", "gemini-1.0-pro"]:
+        if m not in seen:
+            order.append(m)
+        prefixed = f"models/{m}"
+        if prefixed not in seen:
+            order.append(prefixed)
+    return order
+
+def request_structured_json(
     api_key: str,
     system_prompt: str,
     user_prompt: str,
-    model_name: str = "gemini-2.5-flash",
-    temperature: float = 0.2,
-    top_p: float = 0.9,
-    max_output_tokens: int = 8192,
-) -> str:
-    """Generate markdown report using Google GenAI SDK v1.65.0."""
+    model_name: str,
+) -> Dict:
     client = genai.Client(api_key=api_key)
 
-    full_prompt = f"{system_prompt.strip()}\n\n{user_prompt}"
+    cfg_json = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_output_tokens": 8192,
+        "response_mime_type": "application/json",
+    }
+    cfg_plain = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_output_tokens": 8192,
+    }
+    safety = [{"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"}]
 
-    try:
-        resp = client.models.generate_content(
-            model=model_name,
-            contents=full_prompt,
-            # Optional: add config={"temperature": temperature, "top_p": top_p, "max_output_tokens": max_output_tokens}
-        )
-        text = resp.text
-        if not text or not text.strip():
-            raise RuntimeError("Generated text is empty")
-        return text
-    except ClientError as e:
-        raise RuntimeError(f"API call failed: {e}")
+    contents = [
+        {"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"}]},
+        {"role": "user", "parts": [{"text": user_prompt}]},
+    ]
+
+    models = _candidate_models(client, model_name)
+    last_err: Optional[Exception] = None
+    for m in models:
+        try:
+            log(f"Invoking model (JSON): {m}")
+            try:
+                resp = _call_generate_content(client, m, contents, cfg_json, safety)
+            except Exception as e:
+                if _is_mime_error(e):
+                    resp = _call_generate_content(client, m, contents, cfg_plain, safety)
+                else:
+                    raise
+            text = (getattr(resp, "text", "") or "").strip()
+            if not text and getattr(resp, "candidates", None):
+                parts = getattr(resp.candidates[0].content, "parts", []) or []
+                buf: List[str] = []
+                for part in parts:
+                    if getattr(part, "text", None):
+                        buf.append(part.text)
+                text = "".join(buf).strip()
+
+            if not text:
+                last_err = RuntimeError("Empty model response")
+                continue
+
+            # Try JSON parse directly
+            try:
+                return json.loads(text)
+            except json.JSONDecodeError:
+                # Try to extract JSON from plain text (e.g., fenced block)
+                mobj = re.search(r"\{.*\}", text, flags=re.DOTALL)
+                if mobj:
+                    return json.loads(mobj.group(0))
+                last_err = RuntimeError("Model did not return valid JSON")
+                continue
+
+        except ClientError as ce:
+            if _is_not_found(ce):
+                log(f"Model '{m}' not available; trying next candidate...")
+                last_err = ce
+                continue
+            last_err = ce
+            break
+        except Exception as e:
+            last_err = e
+            break
+
+    raise RuntimeError(f"Generation failed: {last_err}")
+
+# ---------- Rendering ---------- #
+
+def render_template(template_path: str, metadata: Dict[str, str], sections: Dict[str, str]) -> str:
+    with open(template_path, "r", encoding="utf-8") as f:
+        tmpl_src = f.read()
+    tmpl = Template(tmpl_src)
+    # Normalize resources to simple list text
+    resources = sections.get("RESOURCES", "").strip()
+    if resources and not resources.startswith("-"):
+        # Turn newline separated URLs into bullet list
+        lines = [l.strip() for l in resources.splitlines() if l.strip()]
+        resources = "\n".join(lines)
+    md = tmpl.render(
+        HUNT_TITLE=metadata.get("HUNT_TITLE", "Untitled Hunt"),
+        ATTACK_ID=metadata.get("ATTACK_ID", ""),
+        ATTACK_NAME=metadata.get("ATTACK_NAME", ""),
+        AUTHOR=metadata.get("AUTHOR", ""),
+        CYCLE_NUMBER=metadata.get("CYCLE_NUMBER", ""),
+        DATE=metadata.get("DATE", ""),
+        ENVIRONMENT=metadata.get("ENVIRONMENT", ""),
+        CLASSIFICATION=metadata.get("CLASSIFICATION", "CUI"),
+        REVISION=metadata.get("REVISION", "Version 1.0"),
+        CUI_CATEGORY=metadata.get("CUI_CATEGORY", "General Proprietary Business Information"),
+        DISSEMINATION=metadata.get("DISSEMINATION", "FEDCON"),
+        POC=metadata.get("POC", ""),
+
+        BACKGROUND=sections.get("BACKGROUND", ""),
+        HYPOTHESIS=sections.get("HYPOTHESIS", ""),
+        ANALYSIS=sections.get("ANALYSIS", ""),
+        FINDINGS=sections.get("FINDINGS", ""),
+        RECOMMENDATIONS=sections.get("RECOMMENDATIONS", ""),
+        ADDITIONAL_RESEARCH=sections.get("ADDITIONAL_RESEARCH", ""),
+        APPENDIX=sections.get("APPENDIX", ""),
+        RESOURCES=resources,
+    )
+    return md
 
 # ---------- Main ---------- #
 
 def main(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(description="CTA Threat Hunt Report generator")
+    parser = argparse.ArgumentParser(description="CTA Threat Hunt Report generator (template-driven)")
     parser.add_argument("--system-file", required=True, help="Path to system prompt file (text)")
-    parser.add_argument("--template", default="templates/threat_hunt_template.md", help="Path to markdown template file")
     parser.add_argument("--prompt", required=True, help="Idea / user prompt text")
     parser.add_argument("--attach", nargs="*", default=[], help="Paths to attachment files")
+    parser.add_argument("--template", default="templates/cta_hunt_report_template.md", help="CTA markdown template path")
     parser.add_argument("--output", required=True, help="Output markdown path")
-    parser.add_argument("--model", default="gemini-2.5-flash", help="Model name (e.g., gemini-2.5-flash)")
-    parser.add_argument("--no-stream", action="store_true", help="Disable streaming")
+    parser.add_argument("--model", default="gemini-1.5-pro-latest", help="Model name")
+    parser.add_argument("--no-stream", action="store_true", help="(unused) kept for CLI compatibility")
     parser.add_argument("--temperature", type=float, default=0.2)
     parser.add_argument("--top-p", type=float, default=0.9)
     parser.add_argument("--max-output-tokens", type=int, default=8192)
     parser.add_argument("--min-section-words", type=int, default=80)
-    parser.add_argument("--strict-sections", action="store_true")
-    parser.add_argument("--skeleton-fallback", action="store_true")
-    parser.add_argument("--require-attack-ids", action="store_true")
+    parser.add_argument("--strict-sections", action="store_true", help="Fail if required sections missing/short")
+    parser.add_argument("--require-attack-ids", action="store_true", help="Require ATT&CK IDs if present in idea")
 
     args = parser.parse_args(argv)
 
@@ -239,53 +364,51 @@ def main(argv: List[str]) -> int:
 
     log_sdk_versions()
 
+    # Read system prompt
     try:
         with open(args.system_file, "r", encoding="utf-8") as f:
             system_prompt = f.read()
-        if not system_prompt.strip():
-            log(f"ERROR: System prompt file {args.system_file} is empty")
-            return 3
     except Exception as e:
         log(f"ERROR: Failed to read system prompt file {args.system_file}: {e}")
         return 3
 
-    template_content = ""
-    if args.template:
-        try:
-            with open(args.template, "r", encoding="utf-8") as f:
-                template_content = f.read()
-        except Exception as e:
-            log(f"ERROR: Failed to read template file {args.template}: {e}")
-            return 3
+    if not system_prompt.strip():
+        log(f"ERROR: System prompt file {args.system_file} is empty")
+        return 3
 
     idea = (args.prompt or "").strip()
     if not idea:
         log("ERROR: --prompt (idea) is required and cannot be empty")
         return 1
 
-    user_prompt = assemble_user_prompt(idea, args.attach, template_content=template_content)
+    # Build a JSON‑focused prompt
+    user_prompt = assemble_json_prompt(idea, args.attach)
 
+    # Generate structured content
     try:
-        output_md = generate_report(
+        data = request_structured_json(
             api_key=api_key,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             model_name=args.model,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            max_output_tokens=args.max_output_tokens,
         )
     except Exception as e:
         log(f"ERROR: {e}")
         traceback.print_exc(file=sys.stderr)
         return 4
 
-    if len(output_md.encode("utf-8")) < 256:
-        log("ERROR: Generated report is too small (<256 bytes); treating as empty")
-        return 5
+    # Validate structure
+    metadata = data.get("metadata", {})
+    sections = data.get("sections", {})
 
+    # Normalize keys to match template variable names
+    norm_sections = {k.upper().strip(): (v or "").strip() for k, v in sections.items()}
+
+    # CTA section validation
+    # Convert keys to lower for validator
+    lower_sections = {k.lower().replace("_", " "): v for k, v in norm_sections.items()}
     valid, errors, word_counts = validate_cta(
-        md=output_md,
+        sections=lower_sections,
         idea=idea,
         min_words=args.min_section_words,
         require_attack_ids=args.require_attack_ids,
@@ -295,19 +418,20 @@ def main(argv: List[str]) -> int:
         log("CTA section validation failed:")
         for e in errors:
             log(f"  - {e}")
-        if args.skeleton_fallback:
-            missing = [msg.replace("Missing required section: ", "") for msg in errors if msg.startswith("Missing required section: ")]
-            output_md = add_missing_sections(output_md, idea, missing)
-            log("Applied skeleton fallback for missing sections.")
-        elif args.strict_sections:
+        if args.strict_sections:
             return 7
         else:
-            log("Continuing without strict enforcement.")
+            log("Continuing; template will render with current sections.")
 
+    # Render template
     try:
         ensure_parent_dir(args.output)
+        md = render_template(args.template, metadata, norm_sections)
+        if len(md.encode("utf-8")) < 256:
+            log("ERROR: Rendered report is too small (<256 bytes)")
+            return 5
         with open(args.output, "w", encoding="utf-8") as f:
-            f.write(output_md)
+            f.write(md)
     except Exception as e:
         log(f"ERROR: Failed to write output to {args.output}: {e}")
         return 6
@@ -315,16 +439,14 @@ def main(argv: List[str]) -> int:
     print(json.dumps({
         "status": "ok",
         "output_path": args.output,
-        "size_bytes": len(output_md.encode("utf-8")),
+        "size_bytes": len(md.encode("utf-8")),
         "model": args.model,
-        "streaming": not args.no_stream,
         "min_section_words": args.min_section_words,
         "word_counts": word_counts,
     }, indent=2))
 
     log(f"SUCCESS: Wrote report to {args.output}")
     return 0
-
 
 if __name__ == "__main__":
     try:
