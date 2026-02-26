@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       idea:
-        description: "Short threat hunt idea"
+        description: "Short threat-hunt idea (e.g., 'T1578 Whisper Leak', 'Azure AD Workload Abuse')"
         required: true
         type: string
       model:
@@ -24,8 +24,6 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Workflow_dispatch → use input
-      # Push → IDEA comes from commit message or placeholder
       IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || '' }}
       MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'gemini-1.5-pro-latest' }}
 
@@ -38,7 +36,7 @@ jobs:
         uses: actions/checkout@v4
 
       #---------------------------------------------------------
-      # 2. Parse idea from commit message (push events only)
+      # 2. Resolve IDEA for push events
       #---------------------------------------------------------
       - name: Resolve IDEA for push events
         if: ${{ github.event_name == 'push' }}
@@ -51,7 +49,7 @@ jobs:
             PARSED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^[[:space:]]*idea:[[:space:]]*//ip' | head -n1)"
 
             if [ -n "$PARSED" ]; then
-              echo "Found IDEA in commit message: $PARSED"
+              echo "Found IDEA: $PARSED"
               echo "IDEA=$PARSED" >> "$GITHUB_ENV"
             else
               echo "::warning::No IDEA provided; using default placeholder."
@@ -60,20 +58,23 @@ jobs:
           fi
 
       #---------------------------------------------------------
-      # 3. Debug context (optional)
+      # 3. Debug (Optional)
       #---------------------------------------------------------
       - name: Debug workspace
         shell: bash
         run: |
           echo "Event: ${{ github.event_name }}"
-          echo "Workspace: $GITHUB_WORKSPACE"
           echo "IDEA: ${IDEA}"
           echo "MODEL: ${MODEL}"
+          echo "Workspace: $GITHUB_WORKSPACE"
           echo "PWD: $(pwd)"
           ls -la
-          echo "---- prompts ----"; ls -la prompts || true
-          echo "---- templates ----"; ls -la templates || true
-          echo "---- output ----"; ls -la output || true
+          echo "--- prompts ---"
+          ls -la prompts || true
+          echo "--- templates ---"
+          ls -la templates || true
+          echo "--- output ---"
+          ls -la output || true
 
       #---------------------------------------------------------
       # 4. Setup Python
@@ -84,8 +85,7 @@ jobs:
           python-version: "3.11"
 
       #---------------------------------------------------------
-      # 5. Install required dependencies
-      #    (google-genai pinned, jinja2 added)
+      # 5. Install Dependencies (WITH WORKING HEREDOC)
       #---------------------------------------------------------
       - name: Install dependencies
         shell: bash
@@ -98,16 +98,19 @@ jobs:
             sed -i '/google-genai/d' requirements.txt || true
             sed -i '/Jinja2/d' requirements.txt || true
             echo "google-genai==1.64.0" >> requirements.txt
-            echo "Jinja2==3.1.4" >> requirements.txt
+            echo "Jinja2==3.1.4"       >> requirements.txt
             pip install -r requirements.txt
           else
             pip install "google-genai==1.64.0" "Jinja2==3.1.4"
           fi
 
+          # ----------------------
+          # 👇 FIXED HEREDOC BLOCK
+          # ----------------------
           python - <<'PY'
 import importlib.metadata as m
 print("google-genai version:", m.version("google-genai"))
-print("jinja2 version:", m.version("Jinja2"))
+print("Jinja2 version:", m.version("Jinja2"))
 PY
 
       #---------------------------------------------------------
@@ -119,21 +122,21 @@ PY
           set -euo pipefail
 
           test -f prompts/hunt_system_prompt.txt \
-            || { echo "::error::Missing: prompts/hunt_system_prompt.txt"; exit 1; }
+            || { echo "::error::Missing prompts/hunt_system_prompt.txt"; exit 1; }
 
           test -f templates/cta_hunt_report_template.md \
-            || { echo "::error::Missing: templates/cta_hunt_report_template.md"; exit 1; }
+            || { echo "::error::Missing templates/cta_hunt_report_template.md"; exit 1; }
 
           mkdir -p output
 
-          [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
-          [[ -f output/findings.json ]] || echo "{}" > output/findings.json
+          [[ -f output/logs.txt ]]     || echo "No logs available." > output/logs.txt
+          [[ -f output/findings.json ]]|| echo "{}"                > output/findings.json
 
-          echo "Idea: '${IDEA}'"
-          echo "Model: '${MODEL}'"
+          echo "Using IDEA: ${IDEA}"
+          echo "Using MODEL: ${MODEL}"
 
       #---------------------------------------------------------
-      # 7. Run report generator
+      # 7. Run Report Generator
       #---------------------------------------------------------
       - name: Run CTA Report Generator
         env:
@@ -144,15 +147,15 @@ PY
           OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
 
           python app/main_ai_studio.py \
-            --system-file prompts/hunt_system_prompt.txt \
-            --prompt "${IDEA}" \
-            --attach output/logs.txt output/findings.json \
-            --template templates/cta_hunt_report_template.md \
-            --model "${MODEL}" \
-            --output "${OUT_PATH}" \
+            --system-file  prompts/hunt_system_prompt.txt \
+            --prompt       "${IDEA}" \
+            --attach       output/logs.txt output/findings.json \
+            --template     templates/cta_hunt_report_template.md \
+            --model        "${MODEL}" \
+            --output       "${OUT_PATH}" \
             --min-section-words 80 \
-            --strict-sections \
-            --require-attack-ids
+              --strict-sections \
+              --require-attack-ids
 
           if [ -f "${OUT_PATH}" ]; then
             echo "Generated file: ${OUT_PATH}"
@@ -163,7 +166,7 @@ PY
           fi
 
       #---------------------------------------------------------
-      # 8. Upload Markdown artifact
+      # 8. Upload Markdown Artifact
       #---------------------------------------------------------
       - name: Upload Markdown Report
         uses: actions/upload-artifact@v4
@@ -174,7 +177,7 @@ PY
           retention-days: 30
 
       #---------------------------------------------------------
-      # 9. Optional DOCX conversion
+      # 9. Convert Markdown → DOCX (optional)
       #---------------------------------------------------------
       - name: Convert Markdown to DOCX
         shell: bash
