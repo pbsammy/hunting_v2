@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CTA Threat Hunt Report generator — resilient to google-genai SDK changes.
+CTA Threat Hunt Report generator — compatible with latest google-genai SDK.
 
 Exit codes:
   1 - invalid CLI usage / missing required args
@@ -15,10 +15,9 @@ Exit codes:
 import argparse
 import os
 import sys
-import time
+import traceback
 import json
 import re
-import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
@@ -166,7 +165,6 @@ def assemble_user_prompt(idea: str, attachments: List[str], template_content: st
         for idx, apath in enumerate(attachments, start=1):
             content = read_text_file(apath)
             if content is None:
-                log(f"WARNING: skipping missing attachment: {apath}")
                 continue
             size = len(content.encode("utf-8"))
             ext = os.path.splitext(apath)[1].lower()
@@ -184,7 +182,25 @@ def assemble_user_prompt(idea: str, attachments: List[str], template_content: st
     )
     return "\n".join(lines).strip()
 
-# ---------- Model Call (generate_report) ---------- #
+# ---------- Model Call (adaptive & robust) ---------- #
+
+def _build_contents(system_prompt: str, user_prompt: str) -> List[Dict]:
+    return [
+        {"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"}]},
+        {"role": "user", "parts": [{"text": user_prompt}]},
+    ]
+
+def _candidate_models(preferred: Optional[str]) -> List[str]:
+    seen = set()
+    order = []
+    if preferred and preferred.strip():
+        order.append(preferred.strip())
+        seen.add(preferred.strip())
+    for m in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"]:
+        if m not in seen:
+            order.append(m)
+            seen.add(m)
+    return order
 
 def generate_report(
     api_key: str,
@@ -197,41 +213,23 @@ def generate_report(
     max_output_tokens: int = 8192,
     safety=None,
 ) -> str:
-    """
-    Call Google GenAI to generate a threat hunt report.
-    Returns the generated markdown as a string.
-    """
+    """Generate markdown report via google-genai SDK."""
     client = genai.Client(api_key=api_key)
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    contents = _build_contents(system_prompt, user_prompt)
     try:
-        if stream:
-            output = []
-            for resp in client.chat.stream(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-                max_output_tokens=max_output_tokens,
-            ):
-                if hasattr(resp, "content") and resp.content:
-                    output.append(resp.content)
-            return "".join(output)
-        else:
-            resp = client.chat.create(
-                model=model_name,
-                messages=messages,
-                temperature=temperature,
-                top_p=top_p,
-                max_output_tokens=max_output_tokens,
-            )
-            if resp.choices:
-                return resp.choices[0].content
-            return ""
+        resp = client.generate(
+            model=model_name,
+            messages=contents,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_output_tokens
+        )
+        text = resp.output_text
+        if not text.strip():
+            raise RuntimeError("Generated text is empty")
+        return text
     except ClientError as e:
-        raise RuntimeError(f"GenAI client error: {e}")
+        raise RuntimeError(f"API call failed: {e}")
 
 # ---------- Main ---------- #
 
@@ -253,6 +251,7 @@ def main(argv: List[str]) -> int:
     parser.add_argument("--require-attack-ids", action="store_true")
 
     args = parser.parse_args(argv)
+
     api_key = os.environ.get("GEMINI_API_KEY", "").strip()
     if not api_key:
         log("ERROR: GEMINI_API_KEY not set")
@@ -296,7 +295,6 @@ def main(argv: List[str]) -> int:
             temperature=args.temperature,
             top_p=args.top_p,
             max_output_tokens=args.max_output_tokens,
-            safety=None,
         )
     except Exception as e:
         log(f"ERROR: {e}")
