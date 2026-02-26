@@ -16,7 +16,7 @@ jobs:
       models: read
 
     steps:
-      - name: Check out repo
+      - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -24,12 +24,13 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies and pandoc
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          # Install Pandoc if not already installed
           sudo apt-get update
-          sudo apt-get install -y pandoc
+          sudo apt-get install -y pandoc texlive-xetex
 
       - name: Ensure output folder exists
         run: mkdir -p output
@@ -43,12 +44,12 @@ jobs:
             fi
           done
 
-      - name: Generate threat hunt Markdown report
+      - name: Generate threat hunt report (Markdown)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euxo pipefail
-          
+
           PROMPT_FILE="prompts/hunt_system_prompt.txt"
           TEMPLATE_PATH="templates/threat_hunt_template.md"
           OUT_MD="output/threat_hunt_report.md"
@@ -61,34 +62,30 @@ jobs:
             --prompt "${{ github.event.inputs.hunt_prompt }}" \
             --attach "${ATTACHMENTS[@]}" \
             --no-stream \
-            --model gemini-2.5-flash \
+            --model "gemini-2.5-flash" \
             --output "$OUT_MD" \
             --min-section-words 80 \
             --strict-sections \
             --require-attack-ids \
             --skeleton-fallback
 
-      - name: Convert Markdown to Word
+      - name: Convert Markdown to Word (.docx)
         run: |
           set -euxo pipefail
           OUT_MD="output/threat_hunt_report.md"
           OUT_DOCX="output/threat_hunt_report.docx"
-          
+
           pandoc "$OUT_MD" \
             -o "$OUT_DOCX" \
             --from markdown \
             --toc \
             --highlight-style pygments \
-            --metadata title="Threat Hunt Report"
+            --metadata "title=Threat Hunt Report"
 
-      - name: Upload Markdown report artifact
+      - name: Upload reports as artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: threat_hunt_report_md
-          path: output/threat_hunt_report.md
-
-      - name: Upload Word report artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: threat_hunt_report_docx
-          path: output/threat_hunt_report.docx
+          name: threat_hunt_reports
+          path: |
+            output/threat_hunt_report.md
+            output/threat_hunt_report.docx
