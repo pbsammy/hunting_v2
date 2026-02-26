@@ -27,45 +27,36 @@
 6. [Resources](#6-resources)
 
 ---
-
 ## 1. Background
 
-{{BACKGROUND_PARAGRAPH_1}}
-
-{{BACKGROUND_PARAGRAPH_2}}
-
-{{BACKGROUND_PARAGRAPH_3}}
-
-{{BACKGROUND_PARAGRAPH_4}}
-
+_The AI should generate 6–10 paragraphs here. Include:_
+- Overview of the threat or vulnerability
 - Figure 1: {{FIGURE_1_DESCRIPTION}}
+- Relevant CVEs
+- Real-world examples
+- Technical details, attack pipeline, and figures if applicable
+- Impact and significance
 
-{{BACKGROUND_PARAGRAPH_5}}
-
-{{BACKGROUND_PARAGRAPH_6}}
-
-{{BACKGROUND_PARAGRAPH_7}}
-
-{{BACKGROUND_PARAGRAPH_8}}
+{{BACKGROUND}}
 
 > **Hypothesis:**  
-{{HYPOTHESIS_PARAGRAPH_1}}
+_The AI should generate 1 paragraph explaining the expected attacker behavior, target systems, and telemetry signals._  
+{{HYPOTHESIS}}
 
 > **Analysis:**  
-{{ANALYSIS_PARAGRAPH_1}}
+_The AI should generate 3–6 paragraphs detailing detection logic, queries, behavioral co-occurrence, example outputs, and reasoning._
 
-{{ANALYSIS_PARAGRAPH_2}}
+{{ANALYSIS}}
 
-{{ANALYSIS_PARAGRAPH_3}}
 - Figure 2: {{FIGURE_2_DESCRIPTION}}
-  
-{{ANALYSIS_PARAGRAPH_4}}
 
 ---
 
 ## 2. Threat Hunt Findings
 
 {{FINDINGS}}
+
+- Figure 3: {{FIGURE_3_DESCRIPTION}}
 
 ---
 
@@ -87,6 +78,8 @@ The Cyber Threat Analytics team created the following detection analytic rule to
 
 ```kql
 {{KQL_QUERY}}```
+
+
 
 ## 6. Resources
 
