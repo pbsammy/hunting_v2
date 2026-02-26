@@ -82,10 +82,7 @@ jobs:
           else
             pip install "google-genai==1.64.0"
           fi
-          python - <<'PY'
-import importlib.metadata as m
-print("google-genai:", m.version("google-genai"))
-PY
+          python -c 'import importlib.metadata as m; print("google-genai:", m.version("google-genai"))'
 
       # 6) Preflight: verify prompts + prepare attachments
       - name: Preflight - verify inputs
