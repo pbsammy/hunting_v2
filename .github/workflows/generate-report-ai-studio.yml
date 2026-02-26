@@ -24,12 +24,14 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install dependencies and pandoc
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y pandoc
 
-      - name: Ensure output folder
+      - name: Ensure output folder exists
         run: mkdir -p output
 
       - name: Create placeholder attachments
@@ -41,7 +43,7 @@ jobs:
             fi
           done
 
-      - name: Generate threat hunt report
+      - name: Generate threat hunt Markdown report
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
@@ -66,8 +68,27 @@ jobs:
             --require-attack-ids \
             --skeleton-fallback
 
-      - name: Upload report as artifact
+      - name: Convert Markdown to Word
+        run: |
+          set -euxo pipefail
+          OUT_MD="output/threat_hunt_report.md"
+          OUT_DOCX="output/threat_hunt_report.docx"
+          
+          pandoc "$OUT_MD" \
+            -o "$OUT_DOCX" \
+            --from markdown \
+            --toc \
+            --highlight-style pygments \
+            --metadata title="Threat Hunt Report"
+
+      - name: Upload Markdown report artifact
         uses: actions/upload-artifact@v4
         with:
-          name: threat_hunt_report
+          name: threat_hunt_report_md
           path: output/threat_hunt_report.md
+
+      - name: Upload Word report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: threat_hunt_report_docx
+          path: output/threat_hunt_report.docx
