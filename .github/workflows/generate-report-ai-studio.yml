@@ -85,7 +85,7 @@ jobs:
           python-version: "3.11"
 
       #---------------------------------------------------------
-      # 5. Install Dependencies (WITH WORKING HEREDOC)
+      # 5. Install Dependencies
       #---------------------------------------------------------
       - name: Install dependencies
         shell: bash
@@ -104,9 +104,7 @@ jobs:
             pip install "google-genai==1.64.0" "Jinja2==3.1.4"
           fi
 
-          # ----------------------
-          # 👇 FIXED HEREDOC BLOCK
-          # ----------------------
+          # Dependency verification
           python - <<'PY'
 import importlib.metadata as m
 print("google-genai version:", m.version("google-genai"))
@@ -129,8 +127,8 @@ PY
 
           mkdir -p output
 
-          [[ -f output/logs.txt ]]     || echo "No logs available." > output/logs.txt
-          [[ -f output/findings.json ]]|| echo "{}"                > output/findings.json
+          [[ -f output/logs.txt ]]      || echo "No logs available." > output/logs.txt
+          [[ -f output/findings.json ]] || echo "{}" > output/findings.json
 
           echo "Using IDEA: ${IDEA}"
           echo "Using MODEL: ${MODEL}"
@@ -147,15 +145,15 @@ PY
           OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
 
           python app/main_ai_studio.py \
-            --system-file  prompts/hunt_system_prompt.txt \
-            --prompt       "${IDEA}" \
-            --attach       output/logs.txt output/findings.json \
-            --template     templates/cta_hunt_report_template.md \
-            --model        "${MODEL}" \
-            --output       "${OUT_PATH}" \
+            --system-file prompts/hunt_system_prompt.txt \
+            --prompt "${IDEA}" \
+            --attach output/logs.txt output/findings.json \
+            --template templates/cta_hunt_report_template.md \
+            --model "${MODEL}" \
+            --output "${OUT_PATH}" \
             --min-section-words 80 \
-              --strict-sections \
-              --require-attack-ids
+            --strict-sections \
+            --require-attack-ids
 
           if [ -f "${OUT_PATH}" ]; then
             echo "Generated file: ${OUT_PATH}"
@@ -177,15 +175,19 @@ PY
           retention-days: 30
 
       #---------------------------------------------------------
-      # 9. Convert Markdown → DOCX (optional)
+      # 9. Convert Markdown → DOCX
       #---------------------------------------------------------
       - name: Convert Markdown to DOCX
         shell: bash
         run: |
           set -euo pipefail
-          sudo apt-get update && sudo apt-get install -y pandoc
+          sudo apt-get update
+          sudo apt-get install -y pandoc
           pandoc output/threat_hunt_report.md -o output/threat_hunt_report.docx
 
+      #---------------------------------------------------------
+      # 10. Upload DOCX Artifact
+      #---------------------------------------------------------
       - name: Upload DOCX Report
         uses: actions/upload-artifact@v4
         with:
