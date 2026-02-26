@@ -5,6 +5,28 @@ This repository automates cyber threat hunt documentation using the Google Gen A
 ## Overview
 The framework performs single-turn generation using the stable v1 API. The user prompt and optional system instruction are passed to the model using the google-genai package. Optional file attachments are supported for log analysis or structured input.
 
+## 🔧 Generate Threat Hunt Report (GitHub Action)
+
+This project includes a GitHub Action to generate a threat hunt report using the Google AI Gemini API and your provided threat inputs.
+
+### 🚀 What It Does
+
+- Prompts an AI model with your threat details
+- Generates a Markdown hunting report (`.md`)
+- Uploads it as a workflow artifact
+
+> Requires a Google AI Studio API key (Gemini) set as a GitHub secret.
+
+### 🧩 Prerequisites
+
+1. Python 3.11+
+2. A Google AI Studio API key
+3. AI model access enabled for your API key
+
+### 📥 Getting Your API Key
+
+Follow the official Google AI Studio docs to generate an API key and enable Gemini.
+
 ## Features
 - Uses the google-genai SDK (current, supported Google Gen AI package)
 - Single-turn text generation
