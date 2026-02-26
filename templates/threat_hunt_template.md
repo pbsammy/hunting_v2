@@ -77,8 +77,8 @@ _The AI should generate 3–6 paragraphs detailing detection logic, queries, beh
 The Cyber Threat Analytics team created the following detection analytic rule to identify this activity.
 
 ```kql
-{{KQL_QUERY}}```
-
+{{KQL_QUERY}}
+```
 
 
 ## 6. Resources
