@@ -105,6 +105,9 @@ examples/
 ## Contributing
 Contributions are welcome. Keep formatting clean and avoid deprecated references.
 
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/50842989-4117-4206-8d6d-5b2aa3ee68db" />
+
+
 ## License
 Add your preferred license such as MIT or Apache 2.0.
 
