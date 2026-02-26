@@ -1,60 +1,42 @@
-# CTA THREAT HUNT REPORT
-## {{ HUNT_TITLE }}
-### Technique: {{ ATTACK_ID }} – {{ ATTACK_NAME }}
+# {{MITRE_ATTACK_ID}}: {{THREAT_NAME}}
+
+**For assistance, please contact your Tier I Service Desk. Visit the DoD365-Joint Information Hub (CAC Required) for more information.**
+
+*TRUST IN DISA – MISSION FIRST, PEOPLE ALWAYS*
 
 ---
 
-## Document Metadata
-**Author:** {{ AUTHOR }}  
-**CTA Cycle:** {{ CYCLE_NUMBER }}  
-**Date:** {{ DATE }}  
-**Customer / Environment:** {{ ENVIRONMENT }}  
-**Classification:** {{ CLASSIFICATION }}  
-**Revision:** {{ REVISION }}
+## 1. Background
+
+{{BACKGROUND}}
+
+> **Hypothesis:**  
+{{HYPOTHESIS}}
+
+> **Analysis:**  
+{{ANALYSIS}}
 
 ---
 
-# 1. Background
-{{ BACKGROUND }}
+## 2. Threat Hunt Findings
+
+{{FINDINGS}}
 
 ---
 
-# 2. Hypothesis
-{{ HYPOTHESIS }}
+## 3. Recommendations
+
+{{RECOMMENDATIONS}}
 
 ---
 
-# 3. Analysis
-{{ ANALYSIS }}
+## 4. Additional Research
+
+{{ADDITIONAL_RESEARCH}}
 
 ---
 
-# 4. Findings (Suspicious Activity Hits)
-{{ FINDINGS }}
+## 5. Appendix
 
----
-
-# 5. Recommendations
-{{ RECOMMENDATIONS }}
-
----
-
-# 6. Additional Research
-{{ ADDITIONAL_RESEARCH }}
-
----
-
-# 7. Appendix
-{{ APPENDIX }}
-
----
-
-# 8. Resources
-{{ RESOURCES }}
-
----
-
-## CUI / Dissemination
-**CUI Category:** {{ CUI_CATEGORY }}  
-**Limited Dissemination:** {{ DISSEMINATION }}  
-**POC:** {{ POC }}
+```kql
+{{KQL_QUERY}}
