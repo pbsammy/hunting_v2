@@ -68,19 +68,24 @@ jobs:
         with:
           python-version: '3.11'
 
-      # 5) Dependencies (SDK >= 1.62.0)
+      # 5) Dependencies (pin google-genai for reproducibility)
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
+            # Ensure we use the pinned SDK version
             sed -i '/^google-genai/d' requirements.txt || true
-            echo 'google-genai>=1.62.0' >> requirements.txt
+            echo 'google-genai==1.64.0' >> requirements.txt
             pip install -r requirements.txt
           else
-            pip install "google-genai>=1.62.0"
+            pip install "google-genai==1.64.0"
           fi
+          python - <<'PY'
+import importlib.metadata as m
+print("google-genai:", m.version("google-genai"))
+PY
 
       # 6) Preflight: verify prompts + prepare attachments
       - name: Preflight - verify inputs
