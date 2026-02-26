@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       idea:
-        description: "Short threat-hunt idea (e.g., 'T1578 whisper leak', 'Azure AD workload abuse')"
+        description: "Short threat-hunt idea"
         required: true
         type: string
       model:
