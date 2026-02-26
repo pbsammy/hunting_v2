@@ -1,166 +1,63 @@
-name: Generate Threat Hunt Report
+name: Generate Threat Hunt Report (AI Studio)
 
 on:
   workflow_dispatch:
     inputs:
-      idea:
-        description: "Short threat-hunt idea (e.g., 'malicious use of workload identities', 'T1578 cloud abuse')"
+      hunt_prompt:
+        description: "Threat hunt prompt"
         required: true
-        type: string
-      model:
-        description: "Gemini model to use (optional). Example: 'gemini-1.5-pro-latest', 'gemini-1.5-flash'"
-        required: false
-        type: string
-  push:
-    branches:
-      - main
-
-permissions:
-  contents: read
-  actions: read
+        default: "Abuse of Azure AD workload identities for credential theft"
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
 
-    # Normalize IDEA + MODEL across event types:
-    # - For workflow_dispatch: use provided inputs
-    # - For push: parse "idea: ..." from commit message; else use placeholder
-    env:
-      IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || '' }}
-      MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'gemini-1.5-pro-latest' }}
+    permissions:
+      contents: read
+      models: read
 
     steps:
-      # 1) Checkout
-      - name: Checkout
+      - name: Check out repo
         uses: actions/checkout@v4
 
-      # 2) Resolve IDEA for push events
-      - name: Resolve IDEA (push events)
-        if: ${{ github.event_name == 'push' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ -z "${IDEA:-}" ]; then
-            COMMIT_MSG="$(git log -1 --pretty=%B)"
-            EXTRACTED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^[[:space:]]*[Ii][Dd][Ee][Aa][[:space:]]*:[[:space:]]*//p' | head -n1)"
-            if [ -n "$EXTRACTED" ]; then
-              echo "Found IDEA in commit message: $EXTRACTED"
-              echo "IDEA=$EXTRACTED" >> "$GITHUB_ENV"
-            else
-              echo "::warning::No IDEA provided; using placeholder for push event."
-              echo "IDEA=Hunting cadence run (no explicit idea provided)" >> "$GITHUB_ENV"
-            fi
-          else
-            echo "IDEA already set: ${IDEA}"
-          fi
-
-      # 3) Debug (optional; remove later)
-      - name: Debug workspace
-        shell: bash
-        run: |
-          echo "Event: ${{ github.event_name }}"
-          echo "Workspace: $GITHUB_WORKSPACE"
-          echo "IDEA: ${IDEA}"
-          echo "MODEL: ${MODEL}"
-          echo "PWD: $(pwd)"
-          ls -la
-          echo "---- prompts ----"; ls -la prompts || true
-          echo "---- output ----"; ls -la output || true
-
-      # 4) Setup Python
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      # 5) Dependencies (pin google-genai for reproducibility)
       - name: Install dependencies
-        shell: bash
         run: |
-          set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            sed -i '/^google-genai/d' requirements.txt || true
-            echo 'google-genai==1.64.0' >> requirements.txt
-            pip install -r requirements.txt
-          else
-            pip install "google-genai==1.64.0"
-          fi
-          python -c 'import importlib.metadata as m; print("google-genai:", m.version("google-genai"))'
+          pip install -r requirements.txt
 
-      # 6) Preflight: verify prompts + prepare attachments
-      - name: Preflight - verify inputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f prompts/hunt_system_prompt.txt \
-            || { echo "::error::prompts/hunt_system_prompt.txt NOT FOUND"; exit 1; }
-          mkdir -p output
-          [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
-          [[ -f output/findings.json ]] || echo "{}" > output/findings.json
-          echo "Idea: '${IDEA}'"
-
-      # 7) Run report generator (STRICT: fail on missing/short sections; require ATT&CK IDs when present)
-      - name: Run report generator
+      - name: Generate threat hunt report
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euxo pipefail
-          OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
+          
+          # Define paths
+          PROMPT_FILE="prompts/hunt_system_prompt.txt"
+          TEMPLATE_PATH="templates/threat_hunt_template.md"
+          OUT_MD="output/threat_hunt_report.md"
+
+          # Ensure output folder exists
+          mkdir -p output
 
           python app/main_ai_studio.py \
-            --system-file prompts/hunt_system_prompt.txt \
-            --prompt "${IDEA}" \
+            --system-file "$PROMPT_FILE" \
+            --template "$TEMPLATE_PATH" \
+            --prompt "${{ github.event.inputs.hunt_prompt }}" \
             --attach output/logs.txt output/findings.json \
             --no-stream \
-            --model "${MODEL}" \
-            --output "${OUT_PATH}" \
+            --model gemini-2.5-flash \
+            --output "$OUT_MD" \
             --min-section-words 80 \
             --strict-sections \
             --require-attack-ids
 
-          if [ -f "${OUT_PATH}" ]; then
-            echo "Generated file: ${OUT_PATH}"
-            stat -c "Size: %s bytes, Modified: %y" "${OUT_PATH}" || true
-          else
-            echo "::warning::Report file not found at ${OUT_PATH}"
-          fi
-
-      # 8) Verify output (fail loudly if empty or missing)
-      - name: Verify report generated
-        shell: bash
-        run: |
-          set -euo pipefail
-          ls -la output
-          REPORT="output/threat_hunt_report.md"
-          if [ ! -f "$REPORT" ]; then
-            echo "::error::Threat hunt report NOT generated at $REPORT"
-            exit 1
-          fi
-          if ! test -s "$REPORT"; then
-            echo "::error::Threat hunt report is empty (0 bytes) at $REPORT"
-            echo "IDEA: ${IDEA}"
-            exit 2
-          fi
-          echo "Report is present and non-empty."
-
-      # 9) Upload the report artifact (strict)
-      - name: Upload Threat Hunt Report artifact
+      - name: Upload report as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: threat-hunt-report
+          name: threat_hunt_report
           path: output/threat_hunt_report.md
-          if-no-files-found: error
-          retention-days: 30
-
-      # 10) (Optional) Upload diagnostic logs to help troubleshoot future runs
-      - name: Upload generator logs (optional)
-        uses: actions/upload-artifact@v4
-        with:
-          name: threat-hunt-logs
-          path: |
-            output/logs.txt
-            output/findings.json
-          if-no-files-found: error
-          retention-days: 7
