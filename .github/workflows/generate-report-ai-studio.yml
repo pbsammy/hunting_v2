@@ -4,81 +4,77 @@ on:
   workflow_dispatch:
     inputs:
       hunt_prompt:
-        description: "Threat hunt idea (e.g. 'Whisper Leak T1578', 'Node.js DoS CVE-2025-59466')"
+        description: "Threat hunt prompt"
         required: true
         type: string
-
-permissions:
-  contents: read
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
 
+    permissions:
+      contents: read
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v4
         with:
           python-version: "3.11"
 
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pandoc
-
-      - name: Install Python dependencies
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
+          sudo apt-get update
+          sudo apt-get install -y pandoc
 
-      - name: Prepare folders
-        run: |
-          mkdir -p output
-          mkdir -p prompts
-          mkdir -p templates
+      - name: Ensure output folder
+        run: mkdir -p output
 
       - name: Create placeholder attachments
         run: |
-          if [ ! -f output/logs.txt ]; then
-            echo "No logs" > output/logs.txt
-          fi
-          if [ ! -f output/findings.json ]; then
-            echo "{}" > output/findings.json
-          fi
+          for file in output/logs.txt output/findings.json; do
+            if [ ! -f "$file" ]; then
+              echo "{}" > "$file"
+            fi
+          done
 
-      - name: Generate threat hunt report (Markdown)
+      - name: Generate markdown threat hunt report
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
+          set -e
+
+          PROMPT_FILE="prompts/hunt_system_prompt.txt"
+          TEMPLATE_PATH="templates/threat_hunt_template.md"
+          OUT_MD="output/threat_hunt_report.md"
+
           python app/main_ai_studio.py \
-            --system-file prompts/hunt_system_prompt.txt \
-            --template templates/cta_hunt_report_template.md \
+            --system-file "$PROMPT_FILE" \
+            --template "$TEMPLATE_PATH" \
             --prompt "${{ github.event.inputs.hunt_prompt }}" \
             --attach output/logs.txt output/findings.json \
             --model gemini-2.5-flash \
-            --output output/threat_hunt_report.md \
-            --min-section-words 80 \
-            --skeleton-fallback
+            --output "$OUT_MD"
 
-      - name: Convert Markdown to Word
+      - name: Convert markdown to Word document
         run: |
-          pandoc output/threat_hunt_report.md \
-            -o output/threat_hunt_report.docx \
+          OUT_MD="output/threat_hunt_report.md"
+          OUT_DOCX="output/threat_hunt_report.docx"
+
+          pandoc "$OUT_MD" \
+            -o "$OUT_DOCX" \
             --from markdown \
             --toc \
             --metadata title="Threat Hunt Report"
 
-      - name: Upload Markdown artifact
+      - name: Upload report artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: threat-hunt-report-md
-          path: output/threat_hunt_report.md
-
-      - name: Upload Word artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: threat-hunt-report-docx
-          path: output/threat_hunt_report.docx
+          name: threat_hunt_report
+          path: |
+            output/threat_hunt_report.md
+            output/threat_hunt_report.docx
