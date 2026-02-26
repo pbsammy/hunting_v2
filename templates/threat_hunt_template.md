@@ -12,7 +12,7 @@
 |:---|:---|
 | **Document Owner** | DEOS Program Management Office |
 | **Title** | {{MITRE_ATTACK_ID}}: {{THREAT_NAME}} |
-| **Prepared by** | Cyber Threat Analytics (CTA) Team via AI Studio |
+| **Prepared by** | Cyber Threat Analytics (CTA) Team |
 | **Publication Date** | {{DATE}} |
 | **Revision Number** | Version 1.0 |
 
@@ -30,13 +30,36 @@
 
 ## 1. Background
 
-{{BACKGROUND}}
+{{BACKGROUND_PARAGRAPH_1}}
+
+{{BACKGROUND_PARAGRAPH_2}}
+
+{{BACKGROUND_PARAGRAPH_3}}
+
+{{BACKGROUND_PARAGRAPH_4}}
+
+- Figure 1: {{FIGURE_1_DESCRIPTION}}
+
+{{BACKGROUND_PARAGRAPH_5}}
+
+{{BACKGROUND_PARAGRAPH_6}}
+
+{{BACKGROUND_PARAGRAPH_7}}
+
+{{BACKGROUND_PARAGRAPH_8}}
 
 > **Hypothesis:**  
-{{HYPOTHESIS}}
+{{HYPOTHESIS_PARAGRAPH_1}}
 
 > **Analysis:**  
-{{ANALYSIS}}
+{{ANALYSIS_PARAGRAPH_1}}
+
+{{ANALYSIS_PARAGRAPH_2}}
+
+{{ANALYSIS_PARAGRAPH_3}}
+- Figure 2: {{FIGURE_2_DESCRIPTION}}
+  
+{{ANALYSIS_PARAGRAPH_4}}
 
 ---
 
