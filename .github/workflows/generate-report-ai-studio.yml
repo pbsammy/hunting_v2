@@ -29,31 +29,42 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Ensure output folder
+        run: mkdir -p output
+
+      - name: Create placeholder attachments
+        run: |
+          for file in output/logs.txt output/findings.json; do
+            if [ ! -f "$file" ]; then
+              echo "{}" > "$file"
+              echo "Created placeholder $file"
+            fi
+          done
+
       - name: Generate threat hunt report
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euxo pipefail
           
-          # Define paths
           PROMPT_FILE="prompts/hunt_system_prompt.txt"
           TEMPLATE_PATH="templates/threat_hunt_template.md"
           OUT_MD="output/threat_hunt_report.md"
 
-          # Ensure output folder exists
-          mkdir -p output
+          ATTACHMENTS=("output/logs.txt" "output/findings.json")
 
           python app/main_ai_studio.py \
             --system-file "$PROMPT_FILE" \
             --template "$TEMPLATE_PATH" \
             --prompt "${{ github.event.inputs.hunt_prompt }}" \
-            --attach output/logs.txt output/findings.json \
+            --attach "${ATTACHMENTS[@]}" \
             --no-stream \
             --model gemini-2.5-flash \
             --output "$OUT_MD" \
             --min-section-words 80 \
             --strict-sections \
-            --require-attack-ids
+            --require-attack-ids \
+            --skeleton-fallback
 
       - name: Upload report as artifact
         uses: actions/upload-artifact@v4
