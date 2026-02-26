@@ -1,25 +1,27 @@
 # Configuration Guide
 
-This document outlines the necessary configuration for the "Generate Threat Hunt Report" GitHub Action.
+## 🔑 GitHub Secrets
 
-## GitHub Secrets
+This action requires:
 
-The action requires a Google AI Studio API key to be stored as a secret in your GitHub repository.
+- `GEMINI_API_KEY` — Your API key for the Google AI SDK (Gemini).  
+  Add it under: **Settings → Secrets and variables → Actions**
 
-*   `GEMINI_API_KEY`: Your API key for the Google AI SDK.
+## ⚙️ Workflow Parameters
 
-To add this secret:
-1.  Go to your repository's **Settings**.
-2.  Navigate to **Secrets and variables > Actions**.
-3.  Click **New repository secret**.
-4.  Enter `GEMINI_API_KEY` as the name and your API key as the value.
+The GitHub Action workflow (e.g., `generate-report-ai-studio.yml`) supports these inputs:
 
-## Workflow Parameters
+| Parameter         | Required | Description |
+|------------------|----------|-------------|
+| `threat_name`     | yes      | The name of the threat |
+| `mitre_attack_id` | yes      | MITRE ATT&CK ID for the threat |
+| `threat_description` | yes  | A detailed description |
+| `attack_vector`   | yes      | Method/attack route |
+| `detection_hypothesis` | yes | How you plan to detect it |
+| `resources`       | no       | URLs for the resources section (comma-separated) |
+| `output_filename` | no       | Name of the generated report MD file (default: `threat_hunt_report.md`) |
 
-The `generate-report-ai-studio.yml` workflow accepts the following input parameter:
+## 🧠 Model Configuration
 
-*   `output_filename`: (Optional) The name for the generated Markdown report file. The default is `threat_hunt_report.md`.
-
-## Model Configuration
-
-The AI model is configured in `main_ai_studio.py`. By default, it uses `gemini-pro`. You can modify the script to use a different model or adjust generation parameters if needed.
+- The script uses `gemini-pro` by default (in `main_ai_studio.py`)
+- You may switch to a different model string if desired
