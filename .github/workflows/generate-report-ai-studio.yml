@@ -7,6 +7,10 @@ on:
         description: "Short threat-hunt idea (e.g., 'malicious use of workload identities', 'T1578 cloud abuse')"
         required: true
         type: string
+      model:
+        description: "Gemini model to use (optional). Example: 'gemini-1.5-pro-latest', 'gemini-1.5-flash'"
+        required: false
+        type: string
   push:
     branches:
       - main
@@ -19,11 +23,12 @@ jobs:
   generate-report:
     runs-on: ubuntu-latest
 
-    # Normalize IDEA across event types:
-    # - For workflow_dispatch: use the provided input
-    # - For push: attempt to parse "idea: ..." from the commit message; else use a placeholder
+    # Normalize IDEA + MODEL across event types:
+    # - For workflow_dispatch: use provided inputs
+    # - For push: parse "idea: ..." from commit message; else use placeholder
     env:
       IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || '' }}
+      MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'gemini-1.5-pro-latest' }}
 
     steps:
       # 1) Checkout
@@ -57,6 +62,7 @@ jobs:
           echo "Event: ${{ github.event_name }}"
           echo "Workspace: $GITHUB_WORKSPACE"
           echo "IDEA: ${IDEA}"
+          echo "MODEL: ${MODEL}"
           echo "PWD: $(pwd)"
           ls -la
           echo "---- prompts ----"; ls -la prompts || true
@@ -75,7 +81,6 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
-            # Ensure we use the pinned SDK version
             sed -i '/^google-genai/d' requirements.txt || true
             echo 'google-genai==1.64.0' >> requirements.txt
             pip install -r requirements.txt
@@ -91,7 +96,6 @@ jobs:
           set -euo pipefail
           test -f prompts/hunt_system_prompt.txt \
             || { echo "::error::prompts/hunt_system_prompt.txt NOT FOUND"; exit 1; }
-          # Create output folder & attachments if missing
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
@@ -110,12 +114,12 @@ jobs:
             --prompt "${IDEA}" \
             --attach output/logs.txt output/findings.json \
             --no-stream \
+            --model "${MODEL}" \
             --output "${OUT_PATH}" \
             --min-section-words 80 \
             --strict-sections \
             --require-attack-ids
 
-          # Echo result size to logs (helps debug path/content issues)
           if [ -f "${OUT_PATH}" ]; then
             echo "Generated file: ${OUT_PATH}"
             stat -c "Size: %s bytes, Modified: %y" "${OUT_PATH}" || true
