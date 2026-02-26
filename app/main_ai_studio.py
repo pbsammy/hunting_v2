@@ -22,8 +22,9 @@ import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
-# Google Gen AI SDK (tested on google-genai==1.64.0)
+# Google Gen AI SDK (pinned in CI to google-genai==1.64.0)
 from google import genai
+from google.genai.errors import ClientError
 
 # ---------- Utilities ---------- #
 
@@ -125,7 +126,6 @@ def validate_cta(md: str, idea: str, min_words: int = 80, require_attack_ids: bo
     errors = []
     word_counts = {}
 
-    # Findings / Suspicious Activity requirement
     if present_map["Findings"] is None and present_map["Suspicious Activity Hits"] is None:
         errors.append("Missing required section: Findings or Suspicious Activity Hits")
 
@@ -188,7 +188,6 @@ def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
             lines.append("```")
             lines.append(content)
             lines.append("```")
-    # Reinforce structure expectations directly in the user prompt
     lines.append(
         "\nREQUIREMENTS:\n"
         "- Produce markdown with explicit H2/H3 headings for: Background, Hypothesis, Analysis, Findings (or Suspicious Activity Hits), Recommendations, Additional Research, Resources. Appendix optional.\n"
@@ -197,60 +196,47 @@ def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
     )
     return "\n".join(lines).strip()
 
-# ---------- Model Call (adaptive to SDK signature) ---------- #
+# ---------- Model Call (adaptive & robust) ---------- #
 
 def _build_contents(system_prompt: str, user_prompt: str) -> List[Dict]:
-    """Embed system prompt safely as the first message for SDKs without system_instruction."""
+    """Embed system prompt as the first message for SDKs without system_instruction."""
     return [
         {"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"}]},
         {"role": "user", "parts": [{"text": user_prompt}]},
     ]
 
 def _call_generate_content(client, model_name: str, contents: List[Dict], gen_cfg: Dict, safety_settings):
-    """
-    Try multiple signatures to survive SDK drift.
-    Return the response object or raise TypeError.
-    """
+    """Try signatures to survive SDK drift; return response or raise."""
     last_err = None
 
-    # 1) Preferred for 1.64.0: config=...
+    # 1) config + safety_settings
     try:
         return client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=gen_cfg,
-            safety_settings=safety_settings,
+            model=model_name, contents=contents, config=gen_cfg, safety_settings=safety_settings
         )
     except TypeError as e:
         last_err = e
 
-    # 2) config without safety_settings
+    # 2) config only
     try:
         return client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            config=gen_cfg,
+            model=model_name, contents=contents, config=gen_cfg
         )
     except TypeError as e:
         last_err = e
 
-    # 3) generation_config=...
+    # 3) generation_config + safety_settings
     try:
         return client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            generation_config=gen_cfg,
-            safety_settings=safety_settings,
+            model=model_name, contents=contents, generation_config=gen_cfg, safety_settings=safety_settings
         )
     except TypeError as e:
         last_err = e
 
-    # 4) generation_config without safety_settings
+    # 4) generation_config only
     try:
         return client.models.generate_content(
-            model=model_name,
-            contents=contents,
-            generation_config=gen_cfg,
+            model=model_name, contents=contents, generation_config=gen_cfg
         )
     except TypeError as e:
         last_err = e
@@ -258,55 +244,47 @@ def _call_generate_content(client, model_name: str, contents: List[Dict], gen_cf
     raise last_err or TypeError("No compatible signature for generate_content")
 
 def _call_generate_content_stream(client, model_name: str, contents: List[Dict], gen_cfg: Dict, safety_settings):
-    """
-    Try multiple signatures for the streaming variant.
-    Return the iterator or raise TypeError.
-    """
+    """Try signatures for streaming; return iterator or raise."""
     last_err = None
 
-    # 1) config=...
+    # 1) config + safety_settings
     try:
         return client.models.generate_content_stream(
-            model=model_name,
-            contents=contents,
-            config=gen_cfg,
-            safety_settings=safety_settings,
+            model=model_name, contents=contents, config=gen_cfg, safety_settings=safety_settings
         )
     except TypeError as e:
         last_err = e
 
-    # 2) config without safety_settings
+    # 2) config only
     try:
         return client.models.generate_content_stream(
-            model=model_name,
-            contents=contents,
-            config=gen_cfg,
+            model=model_name, contents=contents, config=gen_cfg
         )
     except TypeError as e:
         last_err = e
 
-    # 3) generation_config=...
+    # 3) generation_config + safety_settings
     try:
         return client.models.generate_content_stream(
-            model=model_name,
-            contents=contents,
-            generation_config=gen_cfg,
-            safety_settings=safety_settings,
+            model=model_name, contents=contents, generation_config=gen_cfg, safety_settings=safety_settings
         )
     except TypeError as e:
         last_err = e
 
-    # 4) generation_config without safety_settings
+    # 4) generation_config only
     try:
         return client.models.generate_content_stream(
-            model=model_name,
-            contents=contents,
-            generation_config=gen_cfg,
+            model=model_name, contents=contents, generation_config=gen_cfg
         )
     except TypeError as e:
         last_err = e
 
     raise last_err or TypeError("No compatible signature for generate_content_stream")
+
+def _is_mime_error(err: Exception) -> bool:
+    """Detects the 400 INVALID_ARGUMENT related to response_mime_type."""
+    msg = str(err)
+    return "response_mime_type" in msg and "INVALID_ARGUMENT" in msg
 
 def generate_report(
     api_key: str,
@@ -325,11 +303,17 @@ def generate_report(
     """
     client = genai.Client(api_key=api_key)
 
-    gen_cfg = {
+    # Prefer plain text to satisfy server constraints; we still ask for Markdown in prompt.
+    gen_cfg_with_mime = {
         "temperature": temperature,
         "top_p": top_p,
         "max_output_tokens": max_output_tokens,
-        "response_mime_type": "text/markdown",
+        "response_mime_type": "text/plain",
+    }
+    gen_cfg_no_mime = {
+        "temperature": temperature,
+        "top_p": top_p,
+        "max_output_tokens": max_output_tokens,
     }
     safety_settings = safety or [
         {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
@@ -342,9 +326,16 @@ def generate_report(
         if stream:
             log(f"Invoking model (streaming): {model_name}")
             chunks: List[str] = []
-            stream_iter = _call_generate_content_stream(client, model_name, contents, gen_cfg, safety_settings)
+            try:
+                stream_iter = _call_generate_content_stream(client, model_name, contents, gen_cfg_with_mime, safety_settings)
+            except Exception as e:
+                if _is_mime_error(e):
+                    # Retry without response_mime_type
+                    stream_iter = _call_generate_content_stream(client, model_name, contents, gen_cfg_no_mime, safety_settings)
+                else:
+                    raise
+
             for item in stream_iter:
-                # Prefer unified .text if present
                 if getattr(item, "text", None):
                     chunks.append(item.text)
                     continue
@@ -353,15 +344,21 @@ def generate_report(
                     for part in content.parts:
                         if getattr(part, "text", None):
                             chunks.append(part.text)
-                        elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/markdown", "text/plain"):
+                        elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/plain", "application/json"):
                             chunks.append(part.inline_data.data.decode("utf-8", errors="replace"))
             output = "".join(chunks).strip()
 
         else:
             log(f"Invoking model (non-stream): {model_name}")
-            resp = _call_generate_content(client, model_name, contents, gen_cfg, safety_settings)
+            try:
+                resp = _call_generate_content(client, model_name, contents, gen_cfg_with_mime, safety_settings)
+            except Exception as e:
+                if _is_mime_error(e):
+                    # Retry without response_mime_type
+                    resp = _call_generate_content(client, model_name, contents, gen_cfg_no_mime, safety_settings)
+                else:
+                    raise
 
-            # Prefer unified .text when available
             output = (getattr(resp, "text", "") or "").strip()
             if not output and getattr(resp, "candidates", None):
                 parts = getattr(resp.candidates[0].content, "parts", []) or []
@@ -369,7 +366,7 @@ def generate_report(
                 for part in parts:
                     if getattr(part, "text", None):
                         buf.append(part.text)
-                    elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/markdown", "text/plain"):
+                    elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/plain", "application/json"):
                         buf.append(part.inline_data.data.decode("utf-8", errors="replace"))
                 output = "".join(buf).strip()
 
