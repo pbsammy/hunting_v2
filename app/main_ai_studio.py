@@ -34,9 +34,8 @@ from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
 # Google Gen AI SDK
-# pip install google-genai==1.64.0  (or >=1.62.0; dicts keep us future-proof)
+# We expect google-genai>=1.62.0, tested on 1.64.x
 from google import genai
-
 
 # ---------- Utilities ---------- #
 
@@ -69,6 +68,15 @@ def ensure_parent_dir(path: str) -> None:
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
 
+
+def log_sdk_versions() -> None:
+    """Log versions to help diagnose environment mismatch on CI."""
+    try:
+        import importlib.metadata as importlib_metadata
+        ver = importlib_metadata.version("google-genai")
+        log(f"google-genai version: {ver}")
+    except Exception:
+        pass
 
 # ---------- CTA Section Rules & Validation ---------- #
 
@@ -190,7 +198,6 @@ def add_missing_sections(md: str, idea: str, missing_sections: List[str]) -> str
         md = md.rstrip() + "\n\n" + "\n\n".join(additions) + "\n"
     return md
 
-
 # ---------- Prompt Assembly ---------- #
 
 def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
@@ -219,8 +226,7 @@ def assemble_user_prompt(idea: str, attachments: List[str]) -> str:
     )
     return "\n".join(lines).strip()
 
-
-# ---------- Model Call (dict-based; stream & non-stream) ---------- #
+# ---------- Model Call (keyword-only; stream & non-stream) ---------- #
 
 def generate_report(
     api_key: str,
@@ -235,57 +241,75 @@ def generate_report(
 ) -> str:
     """
     Calls Gemini to generate the report. Returns markdown string (non-empty),
-    or raises RuntimeError on failure. Uses dict-based payloads to avoid SDK type churn.
+    or raises RuntimeError on failure. Uses keyword-only calls compatible with
+    recent google-genai versions.
     """
     client = genai.Client(api_key=api_key)
 
-    config = {
+    generation_config = {
         "temperature": temperature,
         "top_p": top_p,
         "max_output_tokens": max_output_tokens,
-        "safety_settings": safety or [
-            {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
-        ],
+        # Prefer markdown responses when supported:
         "response_mime_type": "text/markdown",
     }
-
-    req = {
-        "model": model_name,
-        "config": config,
-        "contents": [
-            {"role": "system", "parts": [{"text": system_prompt}]},
-            {"role": "user",   "parts": [{"text": user_prompt}]},
-        ],
-    }
+    safety_settings = safety or [
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_MEDIUM_AND_ABOVE"},
+    ]
 
     start = time.time()
     try:
         if stream:
             log(f"Invoking model (streaming): {model_name}")
-            chunks = []
-            for evt in client.models.generate_content_stream(req):
-                if evt.type == "content":
-                    # parts may have inline_data (markdown) or text
-                    for part in evt.content.parts:
-                        if getattr(part, "inline_data", None) and part.inline_data.mime_type == "text/markdown":
-                            chunks.append(part.inline_data.data.decode("utf-8", errors="replace"))
-                        elif getattr(part, "text", None):
+            chunks: List[str] = []
+            stream_iter = client.models.generate_content_stream(
+                model=model_name,
+                system_instruction=system_prompt,
+                contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+            )
+
+            for item in stream_iter:
+                # Newer SDK exposes .text on each stream item; fallback to parts if needed
+                if getattr(item, "text", None):
+                    chunks.append(item.text)
+                    continue
+                content = getattr(item, "content", None)
+                if content and getattr(content, "parts", None):
+                    for part in content.parts:
+                        if getattr(part, "text", None):
                             chunks.append(part.text)
-                elif evt.type == "error":
-                    raise RuntimeError(f"Model stream error: {evt.error.message}")
+                        elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/markdown", "text/plain"):
+                            chunks.append(part.inline_data.data.decode("utf-8", errors="replace"))
+
             output = "".join(chunks).strip()
+
         else:
             log(f"Invoking model (non-stream): {model_name}")
-            resp = client.models.generate_content(req)
-            output = ""
-            # prefer markdown inline_data; fallback to text
-            for part in resp.candidates[0].content.parts:
-                if getattr(part, "inline_data", None) and part.inline_data.mime_type == "text/markdown":
-                    output += part.inline_data.data.decode("utf-8", errors="replace")
-                elif getattr(part, "text", None):
-                    output += part.text
-            output = (output or "").strip()
+            resp = client.models.generate_content(
+                model=model_name,
+                system_instruction=system_prompt,
+                contents=[{"role": "user", "parts": [{"text": user_prompt}]}],
+                generation_config=generation_config,
+                safety_settings=safety_settings,
+            )
+            # Prefer unified .text when available
+            output = (getattr(resp, "text", "") or "").strip()
+            if not output:
+                # Fallback to parts parsing
+                if getattr(resp, "candidates", None):
+                    parts = getattr(resp.candidates[0].content, "parts", []) or []
+                    buf: List[str] = []
+                    for part in parts:
+                        if getattr(part, "text", None):
+                            buf.append(part.text)
+                        elif getattr(part, "inline_data", None) and getattr(part.inline_data, "mime_type", "") in ("text/markdown", "text/plain"):
+                            buf.append(part.inline_data.data.decode("utf-8", errors="replace"))
+                    output = "".join(buf).strip()
+
     except Exception as e:
+        # Surface the SDK error; the caller handles exit code
         raise RuntimeError(f"Generation failed: {e}") from e
     finally:
         log(f"Model call duration: {time.time() - start:.2f}s")
@@ -293,7 +317,6 @@ def generate_report(
     if not output:
         raise RuntimeError("Model returned empty content")
     return output
-
 
 # ---------- Main ---------- #
 
@@ -321,6 +344,9 @@ def main(argv: List[str]) -> int:
     if not api_key:
         log("ERROR: GEMINI_API_KEY not set")
         return 2
+
+    # Log SDK versions for CI troubleshooting
+    log_sdk_versions()
 
     # Read system prompt
     try:
