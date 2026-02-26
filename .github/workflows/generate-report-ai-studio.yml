@@ -1,35 +1,12 @@
-# AI Studio Threat Hunt Report Generator – Full Working Setup
-
-This document contains **all required updated files** to make your pipeline work end‑to‑end:
-
-* GitHub Actions workflow (Markdown → AI → DOCX)
-* Python generator (`main_ai_studio.py`)
-* Templates
-* Prompts
-
-Copy each section into the correct file path.
-
----
-
-## .github/workflows/generate-report-ai-studio.yml
-
-```yaml
-name: Generate Threat Hunt Report
+name: Generate Threat Hunt Report (AI Studio)
 
 on:
   workflow_dispatch:
     inputs:
-      idea:
-        description: "Short threat-hunt idea"
+      hunt_prompt:
+        description: "Threat hunt idea (e.g. 'Whisper Leak T1578', 'Node.js DoS CVE-2025-59466')"
         required: true
         type: string
-      model:
-        description: "Gemini model (default: gemini-1.5-pro-latest)"
-        required: false
-        type: string
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -38,12 +15,8 @@ jobs:
   generate-report:
     runs-on: ubuntu-latest
 
-    env:
-      IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || 'Automated scheduled hunt' }}
-      MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'gemini-1.5-pro-latest' }}
-
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Setup Python
@@ -51,278 +24,61 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pandoc
+
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          sudo apt-get update && sudo apt-get install -y pandoc
 
-      - name: Preflight
+      - name: Prepare folders
         run: |
           mkdir -p output
-          echo "{}" > output/logs.txt
-          echo "{}" > output/findings.json
+          mkdir -p prompts
+          mkdir -p templates
 
-      - name: Generate report
+      - name: Create placeholder attachments
+        run: |
+          if [ ! -f output/logs.txt ]; then
+            echo "No logs" > output/logs.txt
+          fi
+          if [ ! -f output/findings.json ]; then
+            echo "{}" > output/findings.json
+          fi
+
+      - name: Generate threat hunt report (Markdown)
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           python app/main_ai_studio.py \
             --system-file prompts/hunt_system_prompt.txt \
             --template templates/cta_hunt_report_template.md \
-            --prompt "${IDEA}" \
+            --prompt "${{ github.event.inputs.hunt_prompt }}" \
+            --attach output/logs.txt output/findings.json \
+            --model gemini-2.5-flash \
             --output output/threat_hunt_report.md \
-            --model "${MODEL}" \
-            --min-section-words 120
+            --min-section-words 80 \
+            --skeleton-fallback
 
-      - name: Convert Markdown → Word
+      - name: Convert Markdown to Word
         run: |
           pandoc output/threat_hunt_report.md \
             -o output/threat_hunt_report.docx \
+            --from markdown \
             --toc \
             --metadata title="Threat Hunt Report"
 
-      - name: Upload artifacts
+      - name: Upload Markdown artifact
         uses: actions/upload-artifact@v4
         with:
-          name: threat-hunt-report
-          path: output/
-```
-
----
-
-## app/main_ai_studio.py
-
-```python
-import argparse
-import os
-from jinja2 import Template
-from google import genai
-from datetime import datetime
-
-
-def load_file(path):
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
-
-
-def generate_sections(client, idea, system_prompt, model):
-    prompt = f"""
-{system_prompt}
-
-Threat hunt idea: {idea}
-
-Generate structured content for sections:
-BACKGROUND, HYPOTHESIS, ANALYSIS, FINDINGS, RECOMMENDATIONS, ADDITIONAL_RESEARCH, RESOURCES, KQL_QUERY
-
-Rules:
-- Background: 6–10 paragraphs
-- Hypothesis: 1 paragraph
-- Analysis: 3–6 paragraphs
-- Findings: realistic hunt results
-- Recommendations: actionable bullets
-- Additional research: forward-looking
-- Resources: URLs
-"""
-
-    resp = client.models.generate_content(
-        model=model,
-        contents=prompt
-    )
-
-    text = resp.text
-    blocks = {}
-    current = None
-    for line in text.splitlines():
-        line = line.strip()
-        if line.endswith(":") and line.replace(":", "").isupper():
-            current = line.replace(":", "")
-            blocks[current] = []
-        elif current:
-            blocks[current].append(line)
-
-    return {k: "\n".join(v).strip() for k, v in blocks.items()}
-
-
-
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--system-file", required=True)
-    ap.add_argument("--template", required=True)
-    ap.add_argument("--prompt", required=True)
-    ap.add_argument("--output", required=True)
-    ap.add_argument("--model", required=True)
-    ap.add_argument("--min-section-words", type=int, default=80)
-    args = ap.parse_args()
-
-    system_prompt = load_file(args.system_file)
-    template_md = load_file(args.template)
-
-    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
-    sections = generate_sections(client, args.prompt, system_prompt, args.model)
-
-    data = {
-        "DATE": datetime.utcnow().strftime("%Y-%m-%d"),
-        "MITRE_ATTACK_ID": "AUTO-GENERATED",
-        "THREAT_NAME": args.prompt,
-        "BACKGROUND": sections.get("BACKGROUND", ""),
-        "HYPOTHESIS": sections.get("HYPOTHESIS", ""),
-        "ANALYSIS": sections.get("ANALYSIS", ""),
-        "FINDINGS": sections.get("FINDINGS", ""),
-        "RECOMMENDATIONS": sections.get("RECOMMENDATIONS", ""),
-        "ADDITIONAL_RESEARCH": sections.get("ADDITIONAL_RESEARCH", ""),
-        "RESOURCES": sections.get("RESOURCES", ""),
-        "KQL_QUERY": sections.get("KQL_QUERY", "// AI-generated analytic")
-    }
-
-    tpl = Template(template_md)
-    output = tpl.render(**data)
-
-    with open(args.output, "w", encoding="utf-8") as f:
-        f.write(output)
-
-    print(f"Report generated: {args.output}")
-
-
-if __name__ == "__main__":
-    main()
-```
-
----
-
-## templates/cta_hunt_report_template.md
-
-````markdown
-# {{MITRE_ATTACK_ID}}: {{THREAT_NAME}}
-
-**For assistance, please contact your Tier I Service Desk. Visit the DoD365-Joint Information Hub (CAC Required) for more information.**
-
-*TRUST IN DISA – MISSION FIRST, PEOPLE ALWAYS*
-
----
-
-## 1. Background
-
-{{BACKGROUND}}
-
-> **Hypothesis:**  
-{{HYPOTHESIS}}
-
-> **Analysis:**  
-{{ANALYSIS}}
-
----
-
-## 2. Threat Hunt Findings
-
-{{FINDINGS}}
-
----
-
-## 3. Recommendations
-
-{{RECOMMENDATIONS}}
-
----
-
-## 4. Additional Research
-
-{{ADDITIONAL_RESEARCH}}
-
----
-
-## 5. Appendix
-
-```kql
-{{KQL_QUERY}}
-````
-
----
-
-## 6. Resources
-
-{{RESOURCES}}
-
----
-
-*End of Document*
-
-````
-
----
-
-## prompts/hunt_system_prompt.txt
-
-```text
-You are a cyber threat intelligence analyst for a government cyber defense organization.
-
-You generate structured, professional threat-hunting reports.
-
-Style:
-- Formal
-- Technical
-- Operational
-- Defensive cyber posture
-
-You must generate:
-BACKGROUND, HYPOTHESIS, ANALYSIS, FINDINGS, RECOMMENDATIONS, ADDITIONAL_RESEARCH, RESOURCES, KQL_QUERY
-
-Use realistic cyber threat language, MITRE ATT&CK concepts, SOC detection logic, and enterprise security context.
-````
-
----
-
-## requirements.txt
-
-```text
-google-genai==1.64.0
-Jinja2==3.1.4
-```
-
----
-
-# Resulting Pipeline Flow
-
-IDEA → Gemini AI → Structured Sections → Markdown Report → Pandoc → Word Document
-
-```
-.idea → main_ai_studio.py → threat_hunt_report.md → pandoc → threat_hunt_report.docx
-```
-
----
-
-# Output Files
-
-* `output/threat_hunt_report.md`
-* `output/threat_hunt_report.docx`
-
-Both uploaded automatically as GitHub Actions artifacts.
-
----
-
-## This system now supports:
-
-* Fully AI‑generated reports
-* Multi‑paragraph Backgrounds
-* Structured analysis
-* Auto Word conversion
-* CI/CD report generation
-* Enterprise-grade formatting
-* Repeatable threat-hunt automation
-
----
-
-If you'd like next upgrades:
-
-* MITRE auto‑mapping
-* CVE auto‑enrichment
-* IOC generation
-* Detection rule packs
-* Multi‑tenant reports
-* JSON export
-* PDF export
-* SharePoint upload
-* Email delivery
-
-Say the word and I’ll wire it in.
+          name: threat-hunt-report-md
+          path: output/threat_hunt_report.md
+
+      - name: Upload Word artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: threat-hunt-report-docx
+          path: output/threat_hunt_report.docx
