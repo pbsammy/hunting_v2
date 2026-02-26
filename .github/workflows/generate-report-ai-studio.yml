@@ -6,7 +6,6 @@ on:
       hunt_prompt:
         description: "Threat hunt prompt"
         required: true
-        default: "Abuse of Azure AD workload identities for credential theft"
 
 jobs:
   generate-report:
