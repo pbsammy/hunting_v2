@@ -1,91 +1,192 @@
-name: Generate Threat Hunt Report (AI Studio)
+name: Generate Threat Hunt Report
 
 on:
   workflow_dispatch:
     inputs:
-      hunt_prompt:
-        description: "Threat hunt prompt"
+      idea:
+        description: "Short threat-hunt idea (e.g., 'T1578 whisper leak', 'Azure AD workload abuse')"
         required: true
+        type: string
+      model:
+        description: "Gemini model name (optional). Default: gemini-1.5-pro-latest"
+        required: false
+        type: string
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   generate-report:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
-      models: read
+    env:
+      # Workflow_dispatch → use input
+      # Push → IDEA comes from commit message or placeholder
+      IDEA: ${{ github.event_name == 'workflow_dispatch' && inputs.idea || '' }}
+      MODEL: ${{ github.event_name == 'workflow_dispatch' && inputs.model || 'gemini-1.5-pro-latest' }}
 
     steps:
-      - name: Check out repository
+
+      #---------------------------------------------------------
+      # 1. Checkout Repo
+      #---------------------------------------------------------
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      #---------------------------------------------------------
+      # 2. Parse idea from commit message (push events only)
+      #---------------------------------------------------------
+      - name: Resolve IDEA for push events
+        if: ${{ github.event_name == 'push' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "${IDEA:-}" ]; then
+            COMMIT_MSG="$(git log -1 --pretty=%B)"
+            PARSED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^[[:space:]]*idea:[[:space:]]*//ip' | head -n1)"
+
+            if [ -n "$PARSED" ]; then
+              echo "Found IDEA in commit message: $PARSED"
+              echo "IDEA=$PARSED" >> "$GITHUB_ENV"
+            else
+              echo "::warning::No IDEA provided; using default placeholder."
+              echo "IDEA=Hunting cadence run (no explicit idea provided)" >> "$GITHUB_ENV"
+            fi
+          fi
+
+      #---------------------------------------------------------
+      # 3. Debug context (optional)
+      #---------------------------------------------------------
+      - name: Debug workspace
+        shell: bash
+        run: |
+          echo "Event: ${{ github.event_name }}"
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "IDEA: ${IDEA}"
+          echo "MODEL: ${MODEL}"
+          echo "PWD: $(pwd)"
+          ls -la
+          echo "---- prompts ----"; ls -la prompts || true
+          echo "---- templates ----"; ls -la templates || true
+          echo "---- output ----"; ls -la output || true
+
+      #---------------------------------------------------------
+      # 4. Setup Python
+      #---------------------------------------------------------
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      #---------------------------------------------------------
+      # 5. Install required dependencies
+      #    (google-genai pinned, jinja2 added)
+      #---------------------------------------------------------
       - name: Install dependencies
+        shell: bash
         run: |
+          set -euo pipefail
+
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          # Install Pandoc if not already installed
-          sudo apt-get update
-          sudo apt-get install -y pandoc texlive-xetex
 
-      - name: Ensure output folder exists
-        run: mkdir -p output
+          if [ -f requirements.txt ]; then
+            sed -i '/google-genai/d' requirements.txt || true
+            sed -i '/Jinja2/d' requirements.txt || true
+            echo "google-genai==1.64.0" >> requirements.txt
+            echo "Jinja2==3.1.4" >> requirements.txt
+            pip install -r requirements.txt
+          else
+            pip install "google-genai==1.64.0" "Jinja2==3.1.4"
+          fi
 
-      - name: Create placeholder attachments
+          python - <<'PY'
+import importlib.metadata as m
+print("google-genai version:", m.version("google-genai"))
+print("jinja2 version:", m.version("Jinja2"))
+PY
+
+      #---------------------------------------------------------
+      # 6. Preflight checks
+      #---------------------------------------------------------
+      - name: Preflight verification
+        shell: bash
         run: |
-          for file in output/logs.txt output/findings.json; do
-            if [ ! -f "$file" ]; then
-              echo "{}" > "$file"
-              echo "Created placeholder $file"
-            fi
-          done
+          set -euo pipefail
 
-      - name: Generate threat hunt report (Markdown)
+          test -f prompts/hunt_system_prompt.txt \
+            || { echo "::error::Missing: prompts/hunt_system_prompt.txt"; exit 1; }
+
+          test -f templates/cta_hunt_report_template.md \
+            || { echo "::error::Missing: templates/cta_hunt_report_template.md"; exit 1; }
+
+          mkdir -p output
+
+          [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
+          [[ -f output/findings.json ]] || echo "{}" > output/findings.json
+
+          echo "Idea: '${IDEA}'"
+          echo "Model: '${MODEL}'"
+
+      #---------------------------------------------------------
+      # 7. Run report generator
+      #---------------------------------------------------------
+      - name: Run CTA Report Generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -euxo pipefail
 
-          PROMPT_FILE="prompts/hunt_system_prompt.txt"
-          TEMPLATE_PATH="templates/threat_hunt_template.md"
-          OUT_MD="output/threat_hunt_report.md"
-
-          ATTACHMENTS=("output/logs.txt" "output/findings.json")
+          OUT_PATH="${{ github.workspace }}/output/threat_hunt_report.md"
 
           python app/main_ai_studio.py \
-            --system-file "$PROMPT_FILE" \
-            --template "$TEMPLATE_PATH" \
-            --prompt "${{ github.event.inputs.hunt_prompt }}" \
-            --attach "${ATTACHMENTS[@]}" \
-            --no-stream \
-            --model "gemini-2.5-flash" \
-            --output "$OUT_MD" \
+            --system-file prompts/hunt_system_prompt.txt \
+            --prompt "${IDEA}" \
+            --attach output/logs.txt output/findings.json \
+            --template templates/cta_hunt_report_template.md \
+            --model "${MODEL}" \
+            --output "${OUT_PATH}" \
             --min-section-words 80 \
             --strict-sections \
-            --require-attack-ids \
-            --skeleton-fallback
+            --require-attack-ids
 
-      - name: Convert Markdown to Word (.docx)
-        run: |
-          set -euxo pipefail
-          OUT_MD="output/threat_hunt_report.md"
-          OUT_DOCX="output/threat_hunt_report.docx"
+          if [ -f "${OUT_PATH}" ]; then
+            echo "Generated file: ${OUT_PATH}"
+            stat -c "Size: %s bytes | Modified: %y" "${OUT_PATH}"
+          else
+            echo "::error::Report not found at ${OUT_PATH}"
+            exit 1
+          fi
 
-          pandoc "$OUT_MD" \
-            -o "$OUT_DOCX" \
-            --from markdown \
-            --toc \
-            --highlight-style pygments \
-            --metadata "title=Threat Hunt Report"
-
-      - name: Upload reports as artifacts
+      #---------------------------------------------------------
+      # 8. Upload Markdown artifact
+      #---------------------------------------------------------
+      - name: Upload Markdown Report
         uses: actions/upload-artifact@v4
         with:
-          name: threat_hunt_reports
-          path: |
-            output/threat_hunt_report.md
-            output/threat_hunt_report.docx
+          name: threat-hunt-report-md
+          path: output/threat_hunt_report.md
+          if-no-files-found: error
+          retention-days: 30
+
+      #---------------------------------------------------------
+      # 9. Optional DOCX conversion
+      #---------------------------------------------------------
+      - name: Convert Markdown to DOCX
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y pandoc
+          pandoc output/threat_hunt_report.md -o output/threat_hunt_report.docx
+
+      - name: Upload DOCX Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: threat-hunt-report-docx
+          path: output/threat_hunt_report.docx
+          if-no-files-found: error
+          retention-days: 30
