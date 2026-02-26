@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CTA Threat Hunt Report generator — compatible with latest google-genai SDK.
+CTA Threat Hunt Report generator — compatible with google-genai SDK v1.65.0.
 
 Exit codes:
   1 - invalid CLI usage / missing required args
@@ -15,9 +15,9 @@ Exit codes:
 import argparse
 import os
 import sys
-import traceback
 import json
 import re
+import traceback
 from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
@@ -182,50 +182,30 @@ def assemble_user_prompt(idea: str, attachments: List[str], template_content: st
     )
     return "\n".join(lines).strip()
 
-# ---------- Model Call (adaptive & robust) ---------- #
-
-def _build_contents(system_prompt: str, user_prompt: str) -> List[Dict]:
-    return [
-        {"role": "user", "parts": [{"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"}]},
-        {"role": "user", "parts": [{"text": user_prompt}]},
-    ]
-
-def _candidate_models(preferred: Optional[str]) -> List[str]:
-    seen = set()
-    order = []
-    if preferred and preferred.strip():
-        order.append(preferred.strip())
-        seen.add(preferred.strip())
-    for m in ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-1.5-flash"]:
-        if m not in seen:
-            order.append(m)
-            seen.add(m)
-    return order
+# ---------- Model Call (updated for GenAI SDK v1.65.0) ---------- #
 
 def generate_report(
     api_key: str,
     system_prompt: str,
     user_prompt: str,
     model_name: str = "gemini-2.5-flash",
-    stream: bool = True,
     temperature: float = 0.2,
     top_p: float = 0.9,
     max_output_tokens: int = 8192,
-    safety=None,
 ) -> str:
-    """Generate markdown report via google-genai SDK."""
+    """Generate markdown report using Google GenAI SDK v1.65.0."""
     client = genai.Client(api_key=api_key)
-    contents = _build_contents(system_prompt, user_prompt)
+
+    full_prompt = f"{system_prompt.strip()}\n\n{user_prompt}"
+
     try:
-        resp = client.generate(
+        resp = client.models.generate_content(
             model=model_name,
-            messages=contents,
-            temperature=temperature,
-            top_p=top_p,
-            max_output_tokens=max_output_tokens
+            contents=full_prompt,
+            # Optional: add config={"temperature": temperature, "top_p": top_p, "max_output_tokens": max_output_tokens}
         )
-        text = resp.output_text
-        if not text.strip():
+        text = resp.text
+        if not text or not text.strip():
             raise RuntimeError("Generated text is empty")
         return text
     except ClientError as e:
@@ -291,7 +271,6 @@ def main(argv: List[str]) -> int:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             model_name=args.model,
-            stream=not args.no_stream,
             temperature=args.temperature,
             top_p=args.top_p,
             max_output_tokens=args.max_output_tokens,
@@ -345,6 +324,7 @@ def main(argv: List[str]) -> int:
 
     log(f"SUCCESS: Wrote report to {args.output}")
     return 0
+
 
 if __name__ == "__main__":
     try:
