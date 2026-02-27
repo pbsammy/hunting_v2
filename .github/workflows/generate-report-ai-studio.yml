@@ -29,10 +29,6 @@ jobs:
       MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-1.5-pro-latest' }}
 
     steps:
-      # (Optional) Catch YAML/Action issues early in CI
-      - name: Lint workflow (actionlint)
-        uses: rhysd/actionlint@v1
-
       # 1) Checkout repo
       - name: Checkout
         uses: actions/checkout@v4
@@ -83,7 +79,7 @@ PY
       - name: Generate report
         shell: bash
         env:
-          IDEA: ${{ env.IDEA }}            # Uses resolved IDEA from prior step (push) or job.env (dispatch)
+          IDEA: ${{ env.IDEA }}   # Uses resolved IDEA from prior step (push) or job.env (dispatch)
           MODEL: ${{ env.MODEL }}
         run: |
           set -euo pipefail
