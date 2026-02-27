@@ -3,75 +3,89 @@ name: Generate Threat Hunt Report (CTA DOCX)
 on:
   workflow_dispatch:
     inputs:
-      hunt_prompt:
-        description: "Threat hunt prompt"
+      idea:
+        description: "Short threat-hunt idea"
         required: true
         type: string
-      prepared_by:
-        description: "Prepared by (defaults to Shawn McWhirter)"
-        required: false
-        type: string
       model:
-        description: "Model name"
+        description: "Gemini model name (optional)"
         required: false
         type: string
-        default: "gemini-2.5-flash"
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
-  generate-report-cta-docx:
+  generate-cta-docx:
     runs-on: ubuntu-latest
 
-    permissions:
-      contents: read
+    env:
+      IDEA: ${{ github.event.inputs.idea }}
+      MODEL: ${{ github.event.inputs.model || 'gemini-2.5-flash' }}
+
+      TEMPLATE_PATH: templates/cta/CTA-reference.docx
+      SYSTEM_FILE: prompts/hunt_system_prompt.txt
+      PROMPT_FILE: prompts/hunt_user_prompt.md
+      OUTPUT_PATH: output/threat_hunt_report.docx
+
+      PREPARED_BY: "McWhirter, Shawn [USA]"
 
     steps:
-      - name: Checkout repository
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      - name: Install dependencies
+      - name: Install Python deps
+        shell: bash
         run: |
+          set -e
           python -m pip install --upgrade pip
-          pip install python-docx google-genai
+          pip install -r requirements.txt
 
-      - name: Ensure output folder
-        run: mkdir -p output
+          # Import checks
+          python -c "import docx; print('OK: python-docx loaded')"
+          python -c "import jinja2; print('OK: Jinja2 loaded')"
 
-      - name: Generate CTA-styled DOCX
+      - name: Pre-flight checks
+        shell: bash
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           set -e
-          SYS_PROMPT="prompts/hunt_system_prompt.txt"
-          TEMPLATE="templates/cta/CTA_THREAT_HUNT_Integrated.docx"
-          OUT_DOCX="output/CTA_THREAT_HUNT_${{ github.run_id }}.docx"
-          PREP_BY="${{ github.event.inputs.prepared_by }}"
-          if [ -z "$PREP_BY" ]; then PREP_BY="Shawn McWhirter"; fi
+          [ -f "$SYSTEM_FILE" ] || { echo "Missing system prompt: $SYSTEM_FILE"; exit 1; }
+          [ -f "$PROMPT_FILE" ] || { echo "Missing user prompt: $PROMPT_FILE"; exit 1; }
+          [ -f "$TEMPLATE_PATH" ] || { echo "Missing CTA DOCX template: $TEMPLATE_PATH"; exit 1; }
+          [ -n "${GEMINI_API_KEY:-}" ] || { echo "ERROR: GEMINI_API_KEY not set"; exit 1; }
 
+      - name: Generate CTA DOCX Report
+        shell: bash
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          IDEA: ${{ env.IDEA }}
+          MODEL: ${{ env.MODEL }}
+        run: |
+          set -e
+          mkdir -p output
+
+          echo "Running CTA generator..."
           python app/main_ai_studio_docx.py \
-            --system-file "$SYS_PROMPT" \
-            --template "$TEMPLATE" \
-            --prompt "${{ github.event.inputs.hunt_prompt }}" \
-            --prepared-by "$PREP_BY" \
-            --model "${{ github.event.inputs.model }}" \
-            --output "$OUT_DOCX"
+            --system-file "$SYSTEM_FILE" \
+            --template "$TEMPLATE_PATH" \
+            --prompt "$PROMPT_FILE" \
+            --prepared-by "$PREPARED_BY" \
+            --model "$MODEL" \
+            --output "$OUTPUT_PATH"
 
-      - name: Upload report artifact
-        if: ${{ success() }}
+          echo "Report written to $OUTPUT_PATH"
+
+      - name: Upload CTA DOCX artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CTA_THREAT_HUNT_DOCX
-          path: output/*.docx
-
-      - name: Upload raw model output (always)
-        if: ${{ always() }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: model_debug
-          path: |
-            output/model_raw.txt
-            output/sections.json
+          name: cta-threat-hunt-report
+          path: ${{ env.OUTPUT_PATH }}
