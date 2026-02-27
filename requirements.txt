@@ -1,3 +1,9 @@
 google-genai==1.65.0
-python-dotenv
 python-docx==1.1.2
+Jinja2==3.1.4
+python-dotenv==1.0.1
+
+# If your script renders Markdown to text/HTML before inserting into the DOCX:
+Markdown==3.6
+# or, alternatively:
+# mistune==3.0.2
