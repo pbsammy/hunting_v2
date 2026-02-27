@@ -32,11 +32,9 @@ jobs:
       USER_PROMPT_PATH: prompts/hunt_user_prompt.md
 
     steps:
-      # 1) Checkout repo
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Resolve IDEA for push events (parse "idea:" from commit message)
       - name: Resolve IDEA for push events
         if: ${{ github.event_name == 'push' }}
         shell: bash
@@ -56,23 +54,22 @@ jobs:
             echo "IDEA already set from env."
           fi
 
-      # 3) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: "pip"
 
-      # 4) (Optional) Install system deps if your pipeline converts MD->DOCX via Pandoc
-      - name: Install system dependencies
+      # Optional: install system tools only if you truly convert MD -> DOCX via Pandoc.
+      # If your script builds DOCX with python-docx directly, you can remove this step.
+      - name: Install system dependencies (optional)
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -y
           sudo apt-get install -y pandoc || true
 
-      # 5) Install Python dependencies (explicitly ensure python-docx is present)
-      - name: Install Python deps
+      - name: Install Python dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -81,43 +78,18 @@ jobs:
             echo "requirements.txt found; installing..."
             pip install -r requirements.txt
           fi
-
-          # Ensure python-docx is installed even if requirements.txt missed it
+          # Ensure python-docx is present even if requirements.txt missed it
           pip install --upgrade python-docx==1.1.2
-
-          # (Optional) other libs commonly used by your app
+          # Useful libs commonly used by AI-studio pipelines
           pip install --upgrade google-genai==1.64.0 Jinja2==3.1.4 || true
+          # Import checks (YAML-safe one-liners, no heredocs)
+          python -c "import sys; __import__('docx'); print('OK: docx import')"
+          python -c "import sys; __import__('jinja2'); print('OK: jinja2 import')"
+          # Version prints (non-fatal if not installed)
+          python -c "import importlib.metadata as m; print('python-docx:', m.version('python-docx'))"
+          python -c "import importlib.metadata as m; print('Jinja2:', m.version('Jinja2'))"
+          python -c "import importlib.metadata as m; print('google-genai:', m.version('google-genai'))"
 
-          # Verify installs; fail fast if missing
-          python - <<'PY'
-import sys
-def check(mod):
-    try:
-        __import__(mod)
-        print(f"OK: {mod} import succeeded")
-    except Exception as e:
-        print(f"ERROR: {mod} import failed: {e}")
-        sys.exit(1)
-
-check("docx")           # python-docx
-check("jinja2")
-PY
-
-          # Show versions for traceability (non-fatal if not present)
-          python - <<'PY'
-import importlib.metadata as m
-def version(name):
-    try:
-        print(name + ":", m.version(name))
-    except Exception as e:
-        print(name + " version lookup failed:", e)
-
-version("python-docx")
-version("Jinja2")
-version("google-genai")
-PY
-
-      # 6) Pre-flight: validate expected inputs/paths
       - name: Validate inputs and paths
         shell: bash
         env:
@@ -133,7 +105,6 @@ PY
           [ -f "$USER_PROMPT_PATH" ] || { echo "User prompt missing: $USER_PROMPT_PATH"; exit 1; }
           echo "Pre-flight OK"
 
-      # 7) Run DOCX generator (AI Studio)
       - name: Generate DOCX report (AI Studio)
         shell: bash
         env:
@@ -152,7 +123,7 @@ PY
           echo "Template: ${TEMPLATE_PATH}"
           echo "Output: ${OUTPUT_PATH}"
 
-          # Try explicit flags first — adjust to your script's argparse if needed
+          # Primary (flags) — tweak names if your argparse differs
           python app/main_ai_studio_docx.py \
             --idea "$IDEA" \
             --model "$MODEL" \
@@ -169,7 +140,6 @@ PY
 
           test -s "$OUTPUT_PATH" && echo "DOCX report generated: $OUTPUT_PATH"
 
-      # 8) Upload artifact
       - name: Upload DOCX artifact
         uses: actions/upload-artifact@v4
         with:
