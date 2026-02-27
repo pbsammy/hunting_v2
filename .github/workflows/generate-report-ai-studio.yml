@@ -69,26 +69,22 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
-      # 4) Install Python dependencies (ensure python-docx & Jinja2)
+      # 4) Install Python dependencies from requirements.txt
       - name: Install Python deps
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then
-            echo "requirements.txt found; installing..."
-            pip install -r requirements.txt
-          fi
-          # Ensure required libs present even if requirements.txt missed them
-          pip install --upgrade python-docx==1.1.2 Jinja2==3.1.4
-
+          pip install -r requirements.txt
           # Import checks (YAML-safe one-liners)
-          python -c "import sys; __import__('docx'); print('OK: docx import')"
-          python -c "import sys; __import__('jinja2'); print('OK: jinja2 import')"
-
+          python -c "import docx; print('OK: python-docx import')"
+          python -c "import jinja2; print('OK: Jinja2 import')"
+          # Optional (only if you added Markdown lib):
+          python -c "import markdown; print('OK: Markdown import')" || true
           # Version prints (optional)
           python -c "import importlib.metadata as m; print('python-docx:', m.version('python-docx'))"
           python -c "import importlib.metadata as m; print('Jinja2:', m.version('Jinja2'))"
+          python -c "import importlib.metadata as m; print('google-genai:', m.version('google-genai'))"
 
       # 5) Pre-flight: validate inputs, paths, and GEMINI_API_KEY secret
       - name: Validate inputs and paths
