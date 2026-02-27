@@ -5,17 +5,21 @@ CTA DOCX Threat Hunt Report Generator
 - Writes directly into a CTA-styled Word template (DOCX)
 - Saves raw model output and parsed sections for troubleshooting
 """
-
-import argparse, os, sys, json, re
+import argparse
+import os
+import sys
+import json
+import re
 from datetime import datetime
 from typing import Dict, Any
 from docx import Document
 from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google import genai
+from jinja2 import Template
 
 # ----------------------------
-# Logging
+# Logging / filesystem helpers
 # ----------------------------
 def log(msg: str) -> None:
     ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
@@ -31,19 +35,17 @@ def ensure_dir(path: str) -> None:
 def _extract_json(text: str) -> dict:
     """
     Try to pull a JSON object from:
-      - ```json ... ``` fenced blocks
-      - the first {...} object in free-form text
+    - ```json ... ``` fenced blocks
+    - the first {...} object in free-form text
     """
     # 1) fenced block ```json ... ```
-    m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=(re.DOTALL | re.IGNORECASE))
     if m:
         return json.loads(m.group(1))
-
     # 2) first JSON object {...}
     m = re.search(r"\{.*\}", text, flags=re.DOTALL)
     if m:
         return json.loads(m.group(0))
-
     raise RuntimeError("No JSON object found in model output.")
 
 def call_model(api_key: str, system_prompt: str, user_prompt: str, model: str) -> Dict[str, Any]:
@@ -53,7 +55,7 @@ def call_model(api_key: str, system_prompt: str, user_prompt: str, model: str) -
         "temperature": 0.2,
         "top_p": 0.9,
         "max_output_tokens": 8192,
-        # Strong hint for JSON-only; supported in newer google-genai versions.
+        # Strong hint for JSON-only; supported in recent google-genai versions.
         "response_mime_type": "application/json",
         # Optional schema; if unsupported, model often still honors mime type.
         "response_schema": {
@@ -81,29 +83,29 @@ def call_model(api_key: str, system_prompt: str, user_prompt: str, model: str) -
         }
     }
 
+    # Compose contents (system guidance and the rendered user prompt with IDEA)
     contents = [{
         "role": "user",
         "parts": [
             {"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"},
-            {"text": f"""
-Return only a single JSON object with this exact structure:
-{{
-  "sections": {{
-    "background": "...",
-    "hypothesis": "...",
-    "analysis": "...",
-    "findings": "...",
-    "recommendations": "...",
-    "additional_research": "...",
-    "appendix": "...",
-    "resources": ["...", "..."]
-  }}
-}}
-No commentary, no markdown, no code fences, no extra text.
-
-THREAT HUNT IDEA:
-{user_prompt.strip()}
-"""}
+            {"text": (
+                "Return only a single JSON object with this exact structure:\n"
+                "{\n"
+                '  "sections": {\n'
+                '    "background": "...",\n'
+                '    "hypothesis": "...",\n'
+                '    "analysis": "...",\n'
+                '    "findings": "...",\n'
+                '    "recommendations": "...",\n'
+                '    "additional_research": "...",\n'
+                '    "appendix": "...",\n'
+                '    "resources": ["...", "..."]\n'
+                "  }\n"
+                "}\n"
+                "No commentary, no markdown, no code fences, no extra text.\n"
+                "THREAT HUNT IDEA:\n"
+                f"{user_prompt.strip()}"
+            )}
         ]
     }]
 
@@ -112,7 +114,6 @@ THREAT HUNT IDEA:
         contents=contents,
         config=generation_config
     )
-
     if not response or not getattr(response, "text", None):
         raise RuntimeError("Model returned empty response")
 
@@ -134,14 +135,10 @@ THREAT HUNT IDEA:
 # DOCX helpers (CTA styling)
 # ----------------------------
 def stamp_header_footer(doc: Document):
-    # CTA header/footer to match your published CTA hunts
+    # Add CTA header/footer; avoid clearing if template already has content
     section = doc.sections[0]
-    # reset header/footer paragraphs
-    for h in section.header.paragraphs:
-        h.clear()
-    for f in section.footer.paragraphs:
-        f.clear()
 
+    # Header
     hp1 = section.header.add_paragraph()
     r1 = hp1.add_run("TRUST IN DISA – MISSION FIRST, PEOPLE ALWAYS")
     r1.bold = True
@@ -152,9 +149,17 @@ def stamp_header_footer(doc: Document):
     r2.bold = True
     hp2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-    fp1 = section.footer.add_paragraph("Controlled By: Defense Information Systems Agency (DISA) | DEOS Program Management Office (PMO) (DISA SD3)")
+    # Footer
+    fp1 = section.footer.add_paragraph(
+        "Controlled By: Defense Information Systems Agency (DISA) "
+        "DEOS Program Management Office (PMO) (DISA SD3)"
+    )
     fp1.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    fp2 = section.footer.add_paragraph("CUI Category: General Proprietary Business Information | Limited Dissemination Control: Federal Employees and Contractors Only (FEDCON)")
+
+    fp2 = section.footer.add_paragraph(
+        "CUI Category: General Proprietary Business Information\n"
+        "Limited Dissemination Control: Federal Employees and Contractors Only (FEDCON)"
+    )
     fp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 def set_styles(doc: Document):
@@ -185,14 +190,21 @@ def add_cover(doc: Document, prepared_by: str):
 
     meta = doc.add_paragraph()
     meta.add_run("Controlled Unclassified Information (CUI)\n").bold = True
+
     doc.add_paragraph(f"Prepared by: {prepared_by}")
     doc.add_paragraph("Document Owner: DEOS Program Management Office")
     doc.add_paragraph("OPR: DISA SD3")
-    doc.add_paragraph("CUI DESIGNATION INDICATOR: CUI Category: General Proprietary Business Information | Dissemination: FEDCON")
+    doc.add_paragraph(
+        "CUI DESIGNATION INDICATOR: CUI Category: General Proprietary Business Information\n"
+        "Dissemination: FEDCON"
+    )
 
     disclaimer = doc.add_paragraph()
     disclaimer.add_run(
-        "DISCLAIMER\nThe contents of this document are not to be construed as an official Defense Information Systems Agency document unless so designated by other authorized documents. The use of trade names in this document does not constitute an official endorsement or approval. Do not cite this document for the purpose of advertisement."
+        "DISCLAIMER\n"
+        "The contents of this document are not to be construed as an official Defense Information Systems Agency document "
+        "unless so designated by other authorized documents. The use of trade names in this document does not constitute "
+        "an official endorsement or approval. Do not cite this document for the purpose of advertisement."
     )
 
 def add_section(doc: Document, title: str, body):
@@ -209,8 +221,8 @@ def add_section(doc: Document, title: str, body):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--system-file", required=True)
-    ap.add_argument("--template", required=True)
-    ap.add_argument("--prompt", required=True)
+    ap.add_argument("--template", required=True)     # must be a DOCX file
+    ap.add_argument("--prompt", required=True)       # path to user prompt template (md/txt)
     ap.add_argument("--prepared-by", default="Shawn McWhirter")
     ap.add_argument("--model", default="gemini-2.5-flash")
     ap.add_argument("--output", required=True)
@@ -221,7 +233,7 @@ def main(argv=None):
         log("ERROR: GEMINI_API_KEY not set")
         return 2
 
-    system_prompt = ""
+    # Read system prompt
     try:
         with open(args.system_file, "r", encoding="utf-8") as f:
             system_prompt = f.read()
@@ -229,22 +241,44 @@ def main(argv=None):
         log(f"ERROR reading system prompt file: {e}")
         return 3
 
+    # Read & render the user prompt template with IDEA context
+    idea = os.environ.get("IDEA", "").strip()
+    try:
+        with open(args.prompt, "r", encoding="utf-8") as f:
+            user_prompt_tpl = f.read()
+    except Exception as e:
+        log(f"ERROR reading user prompt file: {e}")
+        return 3
+
+    try:
+        # Minimal context injection; expand if you want more fields mapped
+        rendered_user_prompt = Template(user_prompt_tpl).render(
+            THREAT_NAME=idea or "Threat",
+            MITRE_ATTACK_ID="TBD",
+            THREAT_DESCRIPTION="",
+            ATTACK_VECTOR="",
+            DETECTION_HYPOTHESIS="",
+            RESOURCES=""
+        )
+    except Exception as e:
+        log(f"ERROR rendering user prompt template: {e}")
+        return 3
+
     # Call LLM for structured sections
     try:
-        data = call_model(api_key, system_prompt, args.prompt, args.model)
+        data = call_model(api_key, system_prompt, rendered_user_prompt, args.model)
     except Exception as e:
         log(str(e))
         return 4
 
     sections = data.get("sections", {})
     required = [
-        "background","hypothesis","analysis","findings",
-        "recommendations","additional_research","appendix","resources"
+        "background", "hypothesis", "analysis", "findings",
+        "recommendations", "additional_research", "appendix", "resources"
     ]
     missing = [k for k in required if k not in sections]
     if missing:
         log(f"ERROR: missing required sections: {missing}")
-        # Still save parsed data to help debugging
         ensure_dir("output")
         with open("output/sections.json", "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2)
@@ -255,9 +289,9 @@ def main(argv=None):
     with open("output/sections.json", "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
-    # Load CTA template and stamp banners/styles
+    # Load CTA DOCX template and stamp banners/styles
     try:
-        doc = Document(args.template)
+        doc = Document(args.template)   # expects a .docx file
     except Exception as e:
         log(f"ERROR opening CTA template: {e}")
         return 6
@@ -280,7 +314,7 @@ def main(argv=None):
     for title, body in order:
         add_section(doc, title, body)
 
-    # Save output
+    # Save output DOCX
     try:
         doc.save(args.output)
     except Exception as e:
