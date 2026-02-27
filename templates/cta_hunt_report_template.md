@@ -1,72 +1,45 @@
-# {{MITRE_ATTACK_ID}}: {{THREAT_NAME}}
-
-**For assistance, please contact your Tier I Service Desk. Visit the DoD365-Joint Information Hub (CAC Required) for more information.**
-
-*TRUST IN DISA – MISSION FIRST, PEOPLE ALWAYS*
+# CTA THREAT HUNT REPORT
+## {{ HUNT_TITLE }}
+### Technique: {{ ATTACK_ID }} – {{ ATTACK_NAME }}
 
 ---
 
-## 1. Background
-
-{{BACKGROUND}}
-
-> **Hypothesis:**  
-{{HYPOTHESIS}}
-
-> **Analysis:**  
-{{ANALYSIS}}
+# Document Metadata
+**Author:** {{ AUTHOR }}  
+**CTA Cycle:** {{ CYCLE_NUMBER }}  
+**Date:** {{ DATE }}  
+**Customer / Environment:** {{ ENVIRONMENT }}  
+**Classification:** {{ CLASSIFICATION }}  
+**Revision:** {{ REVISION }}
 
 ---
 
-## 2. Threat Hunt Findings
+# 1. Background
+{{ BACKGROUND }}
 
-{{FINDINGS}}
+# 2. Hypothesis
+{{ HYPOTHESIS }}
 
----
+# 3. Analysis
+{{ ANALYSIS }}
 
-## 3. Recommendations
+# 4. Findings
+{{ FINDINGS }}
 
-{{RECOMMENDATIONS}}
+# 5. Recommendations
+{{ RECOMMENDATIONS }}
 
----
+# 6. Additional Research
+{{ ADDITIONAL_RESEARCH }}
 
-## 4. Additional Research
+# 7. Appendix
+{{ APPENDIX }}
 
-{{ADDITIONAL_RESEARCH}}
-
----
-
-## 5. Appendix
-
-```kql
-{{KQL_QUERY}}
-```
----
-
-## 6. Resources
-
-{{RESOURCES}}
+# 8. Resources
+{{ RESOURCES }}
 
 ---
 
-## prompts/hunt_system_prompt.txt
-
-```text
-You are a cyber threat intelligence analyst for a government cyber defense organization.
-
-You generate structured, professional threat-hunting reports.
-
-Style:
-- Formal
-- Technical
-- Operational
-- Defensive cyber posture
-
-You must generate:
-BACKGROUND, HYPOTHESIS, ANALYSIS, FINDINGS, RECOMMENDATIONS, ADDITIONAL_RESEARCH, RESOURCES, KQL_QUERY
-
-Use realistic cyber threat language, MITRE ATT&CK concepts, SOC detection logic, and enterprise security context.
-
-```kql
-{{KQL_QUERY}}
-```
+**CUI Category:** {{ CUI_CATEGORY }}  
+**Dissemination:** {{ DISSEMINATION }}  
+**POC:** {{ POC }}
