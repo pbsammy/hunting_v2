@@ -28,7 +28,7 @@ jobs:
       IDEA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.idea || '' }}
       MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-2.5-flash' }}
 
-      # Paths (DOCX template required)
+      # Paths (DOCX template required by python-docx)
       TEMPLATE_PATH: templates/cta/CTA-reference.docx
       SYSTEM_FILE: prompts/hunt_system_prompt.txt
       PROMPT_FILE: prompts/hunt_user_prompt.md
@@ -77,9 +77,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
           # Import checks (YAML-safe one-liners; no heredocs)
-          python -c "import docx; print('OK: python-docx import')"
-          python -c "import jinja2; print('OK: Jinja2 import')"
-          # Optional: if you have Markdown in requirements.txt
+          python -c "import docx; print('OK: python-docx import')"        # required by your script
+          python -c "import jinja2; print('OK: Jinja2 import')"          # needed by patched template rendering
+          # Optional: if you added Markdown in requirements.txt
           python -c "import markdown; print('OK: Markdown import')" || true
           # Version prints (optional)
           python -c "import importlib.metadata as m; print('python-docx:', m.version('python-docx'))"
@@ -104,12 +104,29 @@ jobs:
           [ -n "${GEMINI_API_KEY:-}" ] || { echo "ERROR: GEMINI_API_KEY secret is not set (Repo Settings → Secrets → Actions)"; exit 1; }
           echo "Pre-flight OK"
 
-      # 6) Generate DOCX report (exact flags per your argparse)
+      # 6) Validate requested model; fall back to gemini-2.5-flash if not resolvable
+      - name: Validate and normalize Gemini model
+        shell: bash
+        env:
+          MODEL: ${{ env.MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          echo "Requested model: ${MODEL}"
+          # Try get(); if it raises, fallback.
+          python -c "import os; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); c.models.get(model=os.environ['MODEL'])" \
+          || {
+            echo "Model '${MODEL}' not found; listing available names then falling back..."
+            python -c "import os; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); print([mm.name.split('/')[-1] for mm in c.models.list()])" || true
+            echo "MODEL=gemini-2.5-flash" >> "$GITHUB_ENV"
+          }
+
+      # 7) Generate DOCX report (exact flags per your argparse)
       - name: Generate DOCX report (AI Studio)
         shell: bash
         env:
           IDEA: ${{ env.IDEA }}
-          MODEL: ${{ env.MODEL }}
+          MODEL: ${{ env.MODEL }}            # may be overridden by the fallback above
           TEMPLATE_PATH: ${{ env.TEMPLATE_PATH }}
           SYSTEM_FILE: ${{ env.SYSTEM_FILE }}
           PROMPT_FILE: ${{ env.PROMPT_FILE }}
@@ -137,7 +154,7 @@ jobs:
 
           test -s "$OUTPUT_PATH" && echo "DOCX report generated: $OUTPUT_PATH"
 
-      # 7) Upload artifact
+      # 8) Upload artifact
       - name: Upload DOCX artifact
         uses: actions/upload-artifact@v4
         with:
