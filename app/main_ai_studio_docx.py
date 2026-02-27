@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
 CTA DOCX Threat Hunt Report Generator
-- Uses Google Gemini to generate section content
+- Calls Gemini to generate CTA report sections in JSON
 - Writes directly into a CTA-styled Word template (DOCX)
-- No markdown, no pandoc
+- Saves raw model output and parsed sections for troubleshooting
 """
 
-import argparse, os, sys, json
+import argparse, os, sys, json, re
 from datetime import datetime
 from typing import Dict, Any
 from docx import Document
@@ -14,56 +14,133 @@ from docx.shared import Pt, Inches
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 from google import genai
 
+# ----------------------------
+# Logging
+# ----------------------------
 def log(msg: str) -> None:
     ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
     sys.stderr.write(f"[{ts}] {msg}\n")
     sys.stderr.flush()
 
-def read_text(path: str) -> str:
-    with open(path, "r", encoding="utf-8") as f:
-        return f.read()
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+# ----------------------------
+# Model call + JSON handling
+# ----------------------------
+def _extract_json(text: str) -> dict:
+    """
+    Try to pull a JSON object from:
+      - ```json ... ``` fenced blocks
+      - the first {...} object in free-form text
+    """
+    # 1) fenced block ```json ... ```
+    m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.DOTALL | re.IGNORECASE)
+    if m:
+        return json.loads(m.group(1))
+
+    # 2) first JSON object {...}
+    m = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    if m:
+        return json.loads(m.group(0))
+
+    raise RuntimeError("No JSON object found in model output.")
 
 def call_model(api_key: str, system_prompt: str, user_prompt: str, model: str) -> Dict[str, Any]:
     client = genai.Client(api_key=api_key)
-    # Ask the model to return JSON with CTA sections
+
+    generation_config = {
+        "temperature": 0.2,
+        "top_p": 0.9,
+        "max_output_tokens": 8192,
+        # Strong hint for JSON-only; supported in newer google-genai versions.
+        "response_mime_type": "application/json",
+        # Optional schema; if unsupported, model often still honors mime type.
+        "response_schema": {
+            "type": "object",
+            "properties": {
+                "sections": {
+                    "type": "object",
+                    "properties": {
+                        "background": {"type": "string"},
+                        "hypothesis": {"type": "string"},
+                        "analysis": {"type": "string"},
+                        "findings": {"type": "string"},
+                        "recommendations": {"type": "string"},
+                        "additional_research": {"type": "string"},
+                        "appendix": {"type": "string"},
+                        "resources": {"type": "array", "items": {"type": "string"}}
+                    },
+                    "required": [
+                        "background", "hypothesis", "analysis", "findings",
+                        "recommendations", "additional_research", "appendix", "resources"
+                    ]
+                }
+            },
+            "required": ["sections"]
+        }
+    }
+
     contents = [{
         "role": "user",
         "parts": [
             {"text": f"SYSTEM INSTRUCTION:\n{system_prompt.strip()}"},
             {"text": f"""
-You are a cyber threat hunt report generator. Produce JSON with these keys:
-sections.background, sections.hypothesis, sections.analysis, sections.findings,
-sections.recommendations, sections.additional_research, sections.appendix, sections.resources (array).
-
-Requirements:
-- Tone: DISA/DEOS CTA report style (authoritative).
-- Populate each section with substantive content (no placeholders).
-- Resources: return as a JSON array of strings.
-- Keep content under ~5k words total.
+Return only a single JSON object with this exact structure:
+{{
+  "sections": {{
+    "background": "...",
+    "hypothesis": "...",
+    "analysis": "...",
+    "findings": "...",
+    "recommendations": "...",
+    "additional_research": "...",
+    "appendix": "...",
+    "resources": ["...", "..."]
+  }}
+}}
+No commentary, no markdown, no code fences, no extra text.
 
 THREAT HUNT IDEA:
 {user_prompt.strip()}
 """}
         ]
     }]
+
     response = client.models.generate_content(
         model=model,
         contents=contents,
-        config={"temperature": 0.2, "top_p": 0.9, "max_output_tokens": 8192}
+        config=generation_config
     )
+
     if not response or not getattr(response, "text", None):
         raise RuntimeError("Model returned empty response")
-    try:
-        data = json.loads(response.text)
-    except Exception:
-        raise RuntimeError("Model did not return valid JSON")
-    return data
 
+    raw = response.text
+    ensure_dir("output")
+    with open("output/model_raw.txt", "w", encoding="utf-8") as f:
+        f.write(raw)
+
+    # Strict parse first; if it fails, attempt extraction from fenced blocks or first {...}
+    try:
+        return json.loads(raw)
+    except Exception:
+        try:
+            return _extract_json(raw)
+        except Exception:
+            raise RuntimeError("Model did not return valid JSON")
+
+# ----------------------------
+# DOCX helpers (CTA styling)
+# ----------------------------
 def stamp_header_footer(doc: Document):
-    # Match CTA hunts (header/footer lines). [1](https://boozallen.sharepoint.us/teams/Thunderdome-F-35Execution/_layouts/15/Doc.aspx?sourcedoc=%7B5C10BCE0-25D4-4FED-BA91-6DC876060EA0%7D&file=CUI-CDI%20Rules%20of%20Behavior%20Thunderdome_Lewis_Julien_12112025.docx&action=default&mobileredirect=true&DefaultItemOpen=1)[2](https://boozallen.sharepoint.us/teams/Thunderdome-F-35Execution/_layouts/15/Doc.aspx?sourcedoc=%7B34F09DB0-4577-4CD6-B423-425D6021144C%7D&file=CUI-CDI%20Rules%20of%20Behavior%20Thunderdome_Venturino_12312025.docx&action=default&mobileredirect=true&DefaultItemOpen=1)
+    # CTA header/footer to match your published CTA hunts
     section = doc.sections[0]
+    # reset header/footer paragraphs
     for h in section.header.paragraphs:
         h.clear()
+    for f in section.footer.paragraphs:
+        f.clear()
 
     hp1 = section.header.add_paragraph()
     r1 = hp1.add_run("TRUST IN DISA – MISSION FIRST, PEOPLE ALWAYS")
@@ -75,28 +152,26 @@ def stamp_header_footer(doc: Document):
     r2.bold = True
     hp2.alignment = WD_ALIGN_PARAGRAPH.RIGHT
 
-    for f in section.footer.paragraphs:
-        f.clear()
-
     fp1 = section.footer.add_paragraph("Controlled By: Defense Information Systems Agency (DISA) | DEOS Program Management Office (PMO) (DISA SD3)")
     fp1.alignment = WD_ALIGN_PARAGRAPH.CENTER
     fp2 = section.footer.add_paragraph("CUI Category: General Proprietary Business Information | Limited Dissemination Control: Federal Employees and Contractors Only (FEDCON)")
     fp2.alignment = WD_ALIGN_PARAGRAPH.CENTER
 
 def set_styles(doc: Document):
-    # CTA-like styles (Calibri 11 body, H1/H2 sizes)
     normal = doc.styles["Normal"]
     normal.font.name = "Calibri"
     normal.font.size = Pt(11)
+
     h1 = doc.styles["Heading 1"]
     h1.font.name = "Calibri"
     h1.font.size = Pt(16)
     h1.font.bold = True
+
     h2 = doc.styles["Heading 2"]
     h2.font.name = "Calibri"
     h2.font.size = Pt(13)
     h2.font.bold = True
-    # Margins
+
     section = doc.sections[0]
     section.top_margin = Inches(1)
     section.bottom_margin = Inches(1)
@@ -128,6 +203,9 @@ def add_section(doc: Document, title: str, body):
     else:
         doc.add_paragraph(str(body) if body else "[Insert content]")
 
+# ----------------------------
+# Main
+# ----------------------------
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--system-file", required=True)
@@ -143,23 +221,52 @@ def main(argv=None):
         log("ERROR: GEMINI_API_KEY not set")
         return 2
 
-    system_prompt = read_text(args.system_file)
+    system_prompt = ""
+    try:
+        with open(args.system_file, "r", encoding="utf-8") as f:
+            system_prompt = f.read()
+    except Exception as e:
+        log(f"ERROR reading system prompt file: {e}")
+        return 3
 
-    # Call model to get structured section content
-    data = call_model(api_key, system_prompt, args.prompt, args.model)
+    # Call LLM for structured sections
+    try:
+        data = call_model(api_key, system_prompt, args.prompt, args.model)
+    except Exception as e:
+        log(str(e))
+        return 4
+
     sections = data.get("sections", {})
+    required = [
+        "background","hypothesis","analysis","findings",
+        "recommendations","additional_research","appendix","resources"
+    ]
+    missing = [k for k in required if k not in sections]
+    if missing:
+        log(f"ERROR: missing required sections: {missing}")
+        # Still save parsed data to help debugging
+        ensure_dir("output")
+        with open("output/sections.json", "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return 5
 
-    # Load CTA template (preserves layout). [3](https://boozallen.sharepoint.us/teams/PowerBITigerTeam/SitePages/AI-Builder.aspx?web=1)
-    doc = Document(args.template)
+    # Save structured JSON for inspection
+    ensure_dir("output")
+    with open("output/sections.json", "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
 
-    # Ensure CTA styling & banners (double-safety). [1](https://boozallen.sharepoint.us/teams/Thunderdome-F-35Execution/_layouts/15/Doc.aspx?sourcedoc=%7B5C10BCE0-25D4-4FED-BA91-6DC876060EA0%7D&file=CUI-CDI%20Rules%20of%20Behavior%20Thunderdome_Lewis_Julien_12112025.docx&action=default&mobileredirect=true&DefaultItemOpen=1)[2](https://boozallen.sharepoint.us/teams/Thunderdome-F-35Execution/_layouts/15/Doc.aspx?sourcedoc=%7B34F09DB0-4577-4CD6-B423-425D6021144C%7D&file=CUI-CDI%20Rules%20of%20Behavior%20Thunderdome_Venturino_12312025.docx&action=default&mobileredirect=true&DefaultItemOpen=1)
+    # Load CTA template and stamp banners/styles
+    try:
+        doc = Document(args.template)
+    except Exception as e:
+        log(f"ERROR opening CTA template: {e}")
+        return 6
+
     set_styles(doc)
     stamp_header_footer(doc)
-
-    # Cover + Prepared by
     add_cover(doc, args.prepared_by)
 
-    # Standard CTA sections
+    # Write CTA sections in canonical order
     order = [
         ("Background", sections.get("background")),
         ("Hypothesis", sections.get("hypothesis")),
@@ -173,7 +280,13 @@ def main(argv=None):
     for title, body in order:
         add_section(doc, title, body)
 
-    doc.save(args.output)
+    # Save output
+    try:
+        doc.save(args.output)
+    except Exception as e:
+        log(f"ERROR writing DOCX: {e}")
+        return 7
+
     log(f"SUCCESS: wrote CTA DOCX to {args.output}")
     print(json.dumps({"status": "ok", "docx": args.output}, indent=2))
     return 0
