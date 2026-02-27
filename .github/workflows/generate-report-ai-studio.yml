@@ -29,16 +29,19 @@ jobs:
 
     steps:
 
+      # 1) Checkout repo
       - name: Checkout
         uses: actions/checkout@v4
 
+      # 2) Resolve IDEA for push events (parse "idea:" from commit message)
       - name: Resolve IDEA for push events
         if: ${{ github.event_name == 'push' }}
         shell: bash
         run: |
+          set -euo pipefail
           if [ -z "${IDEA:-}" ]; then
             COMMIT_MSG="$(git log -1 --pretty=%B)"
-            PARSED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^idea:[[:space:]]*//ip' | head -n1)"
+            PARSED="$(printf '%s\n' "$COMMIT_MSG" | sed -n 's/^[[:space:]]*idea:[[:space:]]*//ip' | head -n1)"
             if [ -n "$PARSED" ]; then
               echo "IDEA=$PARSED" >> "$GITHUB_ENV"
             else
@@ -46,38 +49,46 @@ jobs:
             fi
           fi
 
+      # 3) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
+      # 4) Install dependencies + show versions (heredoc inside run: |)
       - name: Install dependencies
         shell: bash
         run: |
+          set -euo pipefail
           python -m pip install --upgrade pip
           pip install google-genai==1.64.0 Jinja2==3.1.4
-
           python - <<'PY'
 import importlib.metadata as m
 print("google-genai:", m.version("google-genai"))
 print("Jinja2:", m.version("Jinja2"))
 PY
 
+      # 5) Preflight checks
       - name: Preflight checks
         shell: bash
         run: |
-          test -f prompts/hunt_system_prompt.txt || { echo "Missing system prompt"; exit 1; }
-          test -f templates/cta_hunt_report_template.md || { echo "Missing CTA markdown template"; exit 1; }
-          test -f templates/CTA-reference.docx || { echo "Missing CTA Word reference document"; exit 1; }
+          set -euo pipefail
+          test -f prompts/hunt_system_prompt.txt || { echo "::error::Missing prompts/hunt_system_prompt.txt"; exit 1; }
+          test -f templates/cta_hunt_report_template.md || { echo "::error::Missing templates/cta_hunt_report_template.md"; exit 1; }
+          test -f templates/CTA-reference.docx || { echo "::error::Missing templates/CTA-reference.docx"; exit 1; }
           mkdir -p output
           [[ -f output/logs.txt ]] || echo "No logs available." > output/logs.txt
           [[ -f output/findings.json ]] || echo "{}" > output/findings.json
+          echo "IDEA: ${IDEA}"
+          echo "MODEL: ${MODEL}"
 
+      # 6) Run the template-driven generator (writes output/threat_hunt_report.md)
       - name: Run CTA Report Generator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         shell: bash
         run: |
+          set -euxo pipefail
           OUT_PATH="output/threat_hunt_report.md"
 
           python app/main_ai_studio.py \
@@ -91,23 +102,31 @@ PY
             --strict-sections \
             --require-attack-ids
 
-          test -f "${OUT_PATH}" || { echo "Report not generated"; exit 1; }
+          test -f "${OUT_PATH}" || { echo "::error::Report not generated"; exit 1; }
+          stat -c "Size: %s bytes | Modified: %y" "${OUT_PATH}" || true
 
+      # 7) Convert Markdown -> DOCX using your CTA Word reference
       - name: Convert Markdown to DOCX using CTA reference
         shell: bash
         run: |
+          set -euo pipefail
           sudo apt-get update && sudo apt-get install -y pandoc
           pandoc output/threat_hunt_report.md \
             --reference-doc="templates/CTA-reference.docx" \
             -o output/threat_hunt_report.docx
 
+      # 8) Upload artifacts
       - name: Upload Markdown
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report-md
           path: output/threat_hunt_report.md
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload DOCX
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report-docx
+          path: output/threat_hunt_report.docx
+          if-no-files-found: error
