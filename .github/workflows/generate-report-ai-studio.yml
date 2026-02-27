@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       model:
-        description: "Gemini model (optional). Examples: gemini-2.5-flash, gemini-1.5-pro-002"
+        description: "Gemini model name (optional). Examples: gemini-2.5-flash, gemini-1.5-pro-002"
         required: false
         type: string
   push:
@@ -28,8 +28,8 @@ jobs:
       IDEA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.idea || '' }}
       MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-2.5-flash' }}
 
-      # Paths
-      TEMPLATE_PATH: templates/cta_hunt_report_template.md
+      # Paths (DOCX template required)
+      TEMPLATE_PATH: templates/cta/CTA-reference.docx
       SYSTEM_FILE: prompts/hunt_system_prompt.txt
       PROMPT_FILE: prompts/hunt_user_prompt.md
       OUTPUT_PATH: output/threat_hunt_report.docx
@@ -79,14 +79,14 @@ jobs:
           # Import checks (YAML-safe one-liners; no heredocs)
           python -c "import docx; print('OK: python-docx import')"
           python -c "import jinja2; print('OK: Jinja2 import')"
-          # Optional: if you added Markdown lib in requirements.txt
+          # Optional: if you have Markdown in requirements.txt
           python -c "import markdown; print('OK: Markdown import')" || true
           # Version prints (optional)
           python -c "import importlib.metadata as m; print('python-docx:', m.version('python-docx'))"
           python -c "import importlib.metadata as m; print('Jinja2:', m.version('Jinja2'))"
           python -c "import importlib.metadata as m; print('google-genai:', m.version('google-genai'))"
 
-      # 5) Pre-flight: validate inputs, paths, and secret
+      # 5) Pre-flight: validate inputs, paths, and GEMINI_API_KEY secret
       - name: Validate inputs and paths
         shell: bash
         env:
@@ -98,35 +98,18 @@ jobs:
         run: |
           set -euo pipefail
           [ -n "${IDEA:-}" ] || { echo "IDEA is empty; set via workflow_dispatch or commit message 'idea:'"; exit 1; }
-          [ -f "$TEMPLATE_PATH" ] || { echo "Template missing: $TEMPLATE_PATH"; exit 1; }
+          [ -f "$TEMPLATE_PATH" ] || { echo "Template missing (DOCX required): $TEMPLATE_PATH"; exit 1; }
           [ -f "$SYSTEM_FILE" ] || { echo "System prompt missing: $SYSTEM_FILE"; exit 1; }
           [ -f "$PROMPT_FILE" ] || { echo "User prompt missing: $PROMPT_FILE"; exit 1; }
           [ -n "${GEMINI_API_KEY:-}" ] || { echo "ERROR: GEMINI_API_KEY secret is not set (Repo Settings → Secrets → Actions)"; exit 1; }
           echo "Pre-flight OK"
 
-      # 6) Validate requested model; fall back to gemini-2.5-flash if not resolvable
-      - name: Validate and normalize Gemini model
-        shell: bash
-        env:
-          MODEL: ${{ env.MODEL }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          set -euo pipefail
-          echo "Requested model: ${MODEL}"
-          # Try get(); if it raises, fallback.
-          python -c "import os,sys; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); req=os.environ.get('MODEL',''); c.models.get(model=req)" \
-          || {
-            echo "Model '${MODEL}' not found; listing available names then falling back..."
-            python -c "import os; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); print([mm.name.split('/')[-1] for mm in c.models.list()])" || true
-            echo "MODEL=gemini-2.5-flash" >> "$GITHUB_ENV"
-          }
-
-      # 7) Generate DOCX report (exact flags per your argparse)
+      # 6) Generate DOCX report (exact flags per your argparse)
       - name: Generate DOCX report (AI Studio)
         shell: bash
         env:
           IDEA: ${{ env.IDEA }}
-          MODEL: ${{ env.MODEL }}            # may be overridden by the fallback above
+          MODEL: ${{ env.MODEL }}
           TEMPLATE_PATH: ${{ env.TEMPLATE_PATH }}
           SYSTEM_FILE: ${{ env.SYSTEM_FILE }}
           PROMPT_FILE: ${{ env.PROMPT_FILE }}
@@ -139,7 +122,7 @@ jobs:
           echo "Idea: ${IDEA}"
           echo "Model: ${MODEL}"
           echo "System file: ${SYSTEM_FILE}"
-          echo "Template: ${TEMPLATE_PATH}"
+          echo "Template (DOCX): ${TEMPLATE_PATH}"
           echo "Prompt: ${PROMPT_FILE}"
           echo "Output: ${OUTPUT_PATH}"
           echo "Prepared by: ${PREPARED_BY}"
@@ -154,7 +137,7 @@ jobs:
 
           test -s "$OUTPUT_PATH" && echo "DOCX report generated: $OUTPUT_PATH"
 
-      # 8) Upload artifact
+      # 7) Upload artifact
       - name: Upload DOCX artifact
         uses: actions/upload-artifact@v4
         with:
