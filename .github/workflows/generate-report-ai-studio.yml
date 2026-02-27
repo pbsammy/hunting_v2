@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       model:
-        description: "Gemini model name (optional)"
+        description: "Gemini model name (optional). Examples: gemini-2.5-flash, gemini-1.5-pro-002"
         required: false
         type: string
   push:
@@ -24,17 +24,17 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Inputs and defaults
+      # Use workflow_dispatch input if present; otherwise fall back to a safe current default
       IDEA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.idea || '' }}
-      MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-1.5-pro-latest' }}
+      MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-2.5-flash' }}
 
-      # Paths (adjust if your script expects different locations)
+      # Paths
       TEMPLATE_PATH: templates/cta_hunt_report_template.md
       SYSTEM_FILE: prompts/hunt_system_prompt.txt
       PROMPT_FILE: prompts/hunt_user_prompt.md
       OUTPUT_PATH: output/threat_hunt_report.docx
 
-      # Prepared-by (use your profile name)
+      # Prepared-by
       PREPARED_BY: "McWhirter, Shawn [USA]"
 
     steps:
@@ -76,10 +76,10 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Import checks (YAML-safe one-liners)
+          # Quick import checks
           python -c "import docx; print('OK: python-docx import')"
           python -c "import jinja2; print('OK: Jinja2 import')"
-          # Optional (only if you added Markdown lib):
+          # Optional: if you added Markdown lib in requirements.txt
           python -c "import markdown; print('OK: Markdown import')" || true
           # Version prints (optional)
           python -c "import importlib.metadata as m; print('python-docx:', m.version('python-docx'))"
@@ -104,12 +104,42 @@ jobs:
           [ -n "${GEMINI_API_KEY:-}" ] || { echo "ERROR: GEMINI_API_KEY secret is not set (Repo Settings → Secrets → Actions)"; exit 1; }
           echo "Pre-flight OK"
 
-      # 6) Run DOCX generator with the exact flags your script expects
+      # 6) Validate model name against the SDK; fall back to gemini-2.5-flash if not found
+      - name: Validate and normalize Gemini model
+        shell: bash
+        env:
+          MODEL: ${{ env.MODEL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          set -euo pipefail
+          echo "Requested model: ${MODEL}"
+          # Try to resolve the model via SDK. If it fails, set a safe default.
+          python -c "import os,sys; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); req=os.environ.get('MODEL',''); ok=False; 
+m=None
+try:
+  m=c.models.get(model=req)
+  ok=True
+  print('Model resolved via get():', m.name)
+except Exception as e:
+  print('get() failed:', e)
+  try:
+    names=[mm.name.split('/')[-1] for mm in c.models.list()]
+    print('Available model names:', names)
+    ok=req in names
+  except Exception as e2:
+    print('list() failed:', e2)
+    ok=False
+sys.exit(0 if ok else 1)" || {
+            echo "Model '${MODEL}' not found or not supported; falling back to gemini-2.5-flash"
+            echo "MODEL=gemini-2.5-flash" >> "$GITHUB_ENV"
+          }
+
+      # 7) Run DOCX generator with your script's exact flags
       - name: Generate DOCX report (AI Studio)
         shell: bash
         env:
           IDEA: ${{ env.IDEA }}
-          MODEL: ${{ env.MODEL }}
+          MODEL: ${{ env.MODEL }}   # may be overridden by step 6 fallback
           TEMPLATE_PATH: ${{ env.TEMPLATE_PATH }}
           SYSTEM_FILE: ${{ env.SYSTEM_FILE }}
           PROMPT_FILE: ${{ env.PROMPT_FILE }}
@@ -127,7 +157,6 @@ jobs:
           echo "Output: ${OUTPUT_PATH}"
           echo "Prepared by: ${PREPARED_BY}"
 
-          # Flags aligned to your script's usage: --system-file, --template, --prompt, --output (+ optional)
           python app/main_ai_studio_docx.py \
             --system-file "$SYSTEM_FILE" \
             --template "$TEMPLATE_PATH" \
@@ -138,9 +167,8 @@ jobs:
 
           test -s "$OUTPUT_PATH" && echo "DOCX report generated: $OUTPUT_PATH"
 
-      # 7) Upload artifact
+      # 8) Upload artifact
       - name: Upload DOCX artifact
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report-docx
-          path: ${{ env.OUTPUT_PATH }}
