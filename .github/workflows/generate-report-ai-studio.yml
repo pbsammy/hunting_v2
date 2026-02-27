@@ -23,7 +23,6 @@ jobs:
   generate-docx-report:
     runs-on: ubuntu-latest
 
-    # Use workflow_dispatch inputs only when that event fired; otherwise fall back to defaults
     env:
       IDEA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.idea || '' }}
       MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-1.5-pro-latest' }}
@@ -62,8 +61,9 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
 
-      # 4) Install system deps (optional; keep if your generator uses pandoc or docx conversions)
+      # 4) (Optional) Install system deps if your pipeline converts MD->DOCX via Pandoc
       - name: Install system dependencies
         shell: bash
         run: |
@@ -71,23 +71,69 @@ jobs:
           sudo apt-get update -y
           sudo apt-get install -y pandoc || true
 
-      # 5) Install Python dependencies
+      # 5) Install Python dependencies (explicitly ensure python-docx is present)
       - name: Install Python deps
         shell: bash
         run: |
           set -euo pipefail
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then
+            echo "requirements.txt found; installing..."
             pip install -r requirements.txt
-          else
-            # Fallback pins; adjust to your actual needs
-            pip install google-genai==1.64.0 Jinja2==3.1.4 python-docx==1.1.2
           fi
-          python -c "import importlib.metadata as m; print('google-genai:', m.version('google-genai'))" || true
-          python -c "import importlib.metadata as m; print('Jinja2:', m.version('Jinja2'))" || true
-          python -c "import importlib.metadata as m; print('python-docx:', m.version('python-docx'))" || true
 
-      # 6) Run DOCX generator (AI Studio)
+          # Ensure python-docx is installed even if requirements.txt missed it
+          pip install --upgrade python-docx==1.1.2
+
+          # (Optional) other libs commonly used by your app
+          pip install --upgrade google-genai==1.64.0 Jinja2==3.1.4 || true
+
+          # Verify installs; fail fast if missing
+          python - <<'PY'
+import sys
+def check(mod):
+    try:
+        __import__(mod)
+        print(f"OK: {mod} import succeeded")
+    except Exception as e:
+        print(f"ERROR: {mod} import failed: {e}")
+        sys.exit(1)
+
+check("docx")           # python-docx
+check("jinja2")
+PY
+
+          # Show versions for traceability (non-fatal if not present)
+          python - <<'PY'
+import importlib.metadata as m
+def version(name):
+    try:
+        print(name + ":", m.version(name))
+    except Exception as e:
+        print(name + " version lookup failed:", e)
+
+version("python-docx")
+version("Jinja2")
+version("google-genai")
+PY
+
+      # 6) Pre-flight: validate expected inputs/paths
+      - name: Validate inputs and paths
+        shell: bash
+        env:
+          IDEA: ${{ env.IDEA }}
+          TEMPLATE_PATH: ${{ env.TEMPLATE_PATH }}
+          SYSTEM_PROMPT_PATH: ${{ env.SYSTEM_PROMPT_PATH }}
+          USER_PROMPT_PATH: ${{ env.USER_PROMPT_PATH }}
+        run: |
+          set -euo pipefail
+          [ -n "${IDEA:-}" ] || { echo "IDEA is empty; set via workflow_dispatch or commit message 'idea:'"; exit 1; }
+          [ -f "$TEMPLATE_PATH" ] || { echo "Template missing: $TEMPLATE_PATH"; exit 1; }
+          [ -f "$SYSTEM_PROMPT_PATH" ] || { echo "System prompt missing: $SYSTEM_PROMPT_PATH"; exit 1; }
+          [ -f "$USER_PROMPT_PATH" ] || { echo "User prompt missing: $USER_PROMPT_PATH"; exit 1; }
+          echo "Pre-flight OK"
+
+      # 7) Run DOCX generator (AI Studio)
       - name: Generate DOCX report (AI Studio)
         shell: bash
         env:
@@ -97,7 +143,6 @@ jobs:
           OUTPUT_PATH: ${{ env.OUTPUT_PATH }}
           SYSTEM_PROMPT_PATH: ${{ env.SYSTEM_PROMPT_PATH }}
           USER_PROMPT_PATH: ${{ env.USER_PROMPT_PATH }}
-          # Set your Google GenAI API key (or equivalent) in repo secrets
           GENAI_API_KEY: ${{ secrets.GENAI_API_KEY }}
         run: |
           set -euo pipefail
@@ -107,8 +152,7 @@ jobs:
           echo "Template: ${TEMPLATE_PATH}"
           echo "Output: ${OUTPUT_PATH}"
 
-          # Primary attempt: call script with explicit flags
-          # Adjust flags to match main_ai_studio_docx.py's CLI if it differs.
+          # Try explicit flags first — adjust to your script's argparse if needed
           python app/main_ai_studio_docx.py \
             --idea "$IDEA" \
             --model "$MODEL" \
@@ -117,7 +161,7 @@ jobs:
             --user-prompt "$USER_PROMPT_PATH" \
             --output "$OUTPUT_PATH" \
           || {
-            echo "CLI flags may differ; retrying without flags with env vars..."
+            echo "Flagged invocation failed; retrying with env-only call..."
             IDEA="$IDEA" MODEL="$MODEL" TEMPLATE_PATH="$TEMPLATE_PATH" OUTPUT_PATH="$OUTPUT_PATH" \
             SYSTEM_PROMPT_PATH="$SYSTEM_PROMPT_PATH" USER_PROMPT_PATH="$USER_PROMPT_PATH" GENAI_API_KEY="$GENAI_API_KEY" \
             python app/main_ai_studio_docx.py
@@ -125,7 +169,7 @@ jobs:
 
           test -s "$OUTPUT_PATH" && echo "DOCX report generated: $OUTPUT_PATH"
 
-      # 7) Upload artifact
+      # 8) Upload artifact
       - name: Upload DOCX artifact
         uses: actions/upload-artifact@v4
         with:
