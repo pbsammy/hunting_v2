@@ -19,5 +19,5 @@ Rules:
 - Provide realistic analysis
 - Produce professional documentation quality output
 
-Output format: Markdown
-Document type: Threat Hunt Intelligence Report
+Output format: JSON only (exact schema provided in the user instructions)
+Document type: Threat Hunt Intelligence Report (JSON structure only)
