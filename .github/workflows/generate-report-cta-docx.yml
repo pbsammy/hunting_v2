@@ -61,7 +61,17 @@ jobs:
             --output "$OUT_DOCX"
 
       - name: Upload report artifact
+        if: ${{ success() }}
         uses: actions/upload-artifact@v4
         with:
           name: CTA_THREAT_HUNT_DOCX
           path: output/*.docx
+
+      - name: Upload raw model output (always)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: model_debug
+          path: |
+            output/model_raw.txt
+            output/sections.json
