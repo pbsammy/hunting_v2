@@ -8,7 +8,7 @@ on:
         required: true
         type: string
       model:
-        description: "Gemini model name (optional). Examples: gemini-2.5-flash, gemini-1.5-pro-002"
+        description: "Gemini model (optional). Examples: gemini-2.5-flash, gemini-1.5-pro-002"
         required: false
         type: string
   push:
@@ -24,7 +24,7 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      # Use workflow_dispatch input if present; otherwise fall back to a safe current default
+      # Use workflow_dispatch inputs when provided; otherwise default to a safe, current model.
       IDEA: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.idea || '' }}
       MODEL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.model || 'gemini-2.5-flash' }}
 
@@ -34,15 +34,15 @@ jobs:
       PROMPT_FILE: prompts/hunt_user_prompt.md
       OUTPUT_PATH: output/threat_hunt_report.docx
 
-      # Prepared-by
+      # Attribution
       PREPARED_BY: "McWhirter, Shawn [USA]"
 
     steps:
-      # 1) Checkout repo
+      # 1) Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 2) Resolve IDEA for push events (parse "idea:" from commit message)
+      # 2) Resolve IDEA for push events
       - name: Resolve IDEA for push events
         if: ${{ github.event_name == 'push' }}
         shell: bash
@@ -76,7 +76,7 @@ jobs:
           set -euo pipefail
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # Quick import checks
+          # Import checks (YAML-safe one-liners; no heredocs)
           python -c "import docx; print('OK: python-docx import')"
           python -c "import jinja2; print('OK: Jinja2 import')"
           # Optional: if you added Markdown lib in requirements.txt
@@ -86,7 +86,7 @@ jobs:
           python -c "import importlib.metadata as m; print('Jinja2:', m.version('Jinja2'))"
           python -c "import importlib.metadata as m; print('google-genai:', m.version('google-genai'))"
 
-      # 5) Pre-flight: validate inputs, paths, and GEMINI_API_KEY secret
+      # 5) Pre-flight: validate inputs, paths, and secret
       - name: Validate inputs and paths
         shell: bash
         env:
@@ -104,7 +104,7 @@ jobs:
           [ -n "${GEMINI_API_KEY:-}" ] || { echo "ERROR: GEMINI_API_KEY secret is not set (Repo Settings → Secrets → Actions)"; exit 1; }
           echo "Pre-flight OK"
 
-      # 6) Validate model name against the SDK; fall back to gemini-2.5-flash if not found
+      # 6) Validate requested model; fall back to gemini-2.5-flash if not resolvable
       - name: Validate and normalize Gemini model
         shell: bash
         env:
@@ -113,33 +113,20 @@ jobs:
         run: |
           set -euo pipefail
           echo "Requested model: ${MODEL}"
-          # Try to resolve the model via SDK. If it fails, set a safe default.
-          python -c "import os,sys; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); req=os.environ.get('MODEL',''); ok=False; 
-m=None
-try:
-  m=c.models.get(model=req)
-  ok=True
-  print('Model resolved via get():', m.name)
-except Exception as e:
-  print('get() failed:', e)
-  try:
-    names=[mm.name.split('/')[-1] for mm in c.models.list()]
-    print('Available model names:', names)
-    ok=req in names
-  except Exception as e2:
-    print('list() failed:', e2)
-    ok=False
-sys.exit(0 if ok else 1)" || {
-            echo "Model '${MODEL}' not found or not supported; falling back to gemini-2.5-flash"
+          # Try get(); if it raises, fallback.
+          python -c "import os,sys; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); req=os.environ.get('MODEL',''); c.models.get(model=req)" \
+          || {
+            echo "Model '${MODEL}' not found; listing available names then falling back..."
+            python -c "import os; from google import genai; c=genai.Client(api_key=os.environ['GEMINI_API_KEY']); print([mm.name.split('/')[-1] for mm in c.models.list()])" || true
             echo "MODEL=gemini-2.5-flash" >> "$GITHUB_ENV"
           }
 
-      # 7) Run DOCX generator with your script's exact flags
+      # 7) Generate DOCX report (exact flags per your argparse)
       - name: Generate DOCX report (AI Studio)
         shell: bash
         env:
           IDEA: ${{ env.IDEA }}
-          MODEL: ${{ env.MODEL }}   # may be overridden by step 6 fallback
+          MODEL: ${{ env.MODEL }}            # may be overridden by the fallback above
           TEMPLATE_PATH: ${{ env.TEMPLATE_PATH }}
           SYSTEM_FILE: ${{ env.SYSTEM_FILE }}
           PROMPT_FILE: ${{ env.PROMPT_FILE }}
@@ -172,3 +159,4 @@ sys.exit(0 if ok else 1)" || {
         uses: actions/upload-artifact@v4
         with:
           name: threat-hunt-report-docx
+          path: ${{ env.OUTPUT_PATH }}
